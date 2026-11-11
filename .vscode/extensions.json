@@ -1,0 +1,13 @@
+{
+  "recommendations": [
+    "ms-vscode-remote.remote-wsl",
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "charliermarsh.ruff",
+    "ms-toolsai.jupyter",
+    "ms-azuretools.vscode-containers",
+    "redhat.vscode-yaml",
+    "tamasfe.even-better-toml",
+    "editorconfig.editorconfig"
+  ]
+}

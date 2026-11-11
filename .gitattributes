@@ -1,0 +1,4 @@
+# Normalize line endings to LF everywhere (Windows + WSL safety)
+* text=auto eol=lf
+*.png binary
+*.jpg binary
