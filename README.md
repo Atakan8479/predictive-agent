@@ -25,9 +25,12 @@ uv run pre-commit install
 
 ```bash
 uv run pa-doctor --runs 5
+uv run pa-doctor --runs 5 --cached --json doctor-cached.json
 ```
 
 Ollama'ya erişimi, modelin kurulu olduğunu kontrol eder; modeli ısıtıp sıcak üretim hızını ölçer.
+Varsayılan benchmark her çalıştırmada benzersiz bir prompt ile cache'siz prefill'i ölçer;
+`--cached` aynı promptu tekrarlayarak cache'li koşulu ayrı raporlar.
 
 ## Geliştirme
 
