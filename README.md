@@ -5,7 +5,7 @@ niyetini tahmin eder ve ana ajan çalışmaya başlamadan **önce** gereken dı�
 çekip in-memory cache'e yazar. Ana ajan bu veriyi ağ gecikmesi yaşamadan okur
 (predictive tool prefetching).
 
-> **Durum:** M0 — geliştirme ortamı. Yol haritası için [ROADMAP.md](ROADMAP.md),
+> **Durum:** M0 tamamlandı; M1 geliştirmesi devam ediyor. Yol haritası için [ROADMAP.md](ROADMAP.md),
 > mimari kararlar için [docs/adr/](docs/adr/).
 
 ## Gereksinimler

@@ -6,6 +6,10 @@
 
 <!-- Problemi veya motivasyonu açıkla. İlgili ADR varsa bağla. -->
 
+## How does it work?
+
+<!-- Uygulamanın nasıl çalıştığını ve önemli teknik kararları açıkla. -->
+
 ## Nasıl test edildi?
 
 - [ ] `uv run pytest`
