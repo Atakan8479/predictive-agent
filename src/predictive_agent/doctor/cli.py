@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from predictive_agent.config import get_settings
+from predictive_agent.config import Settings, get_settings
 from predictive_agent.doctor.ollama import GenerationStats, OllamaProbe, OllamaResponseError
 
 # ~400 tokens of realistic agent context so prompt-eval throughput is meaningful.
@@ -79,12 +79,13 @@ async def run(
     cached: bool = False,
     json_path: Path | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    settings: Settings | None = None,
 ) -> int:
     if runs < 1:
         _fail("--runs must be at least 1")
         return 2
 
-    settings = get_settings()
+    settings = settings or get_settings()
     timeout = httpx.Timeout(settings.http_timeout_s, connect=3.0)
     mode = "cached" if cached else "uncached"
 
@@ -114,6 +115,16 @@ async def run(
                 keep_alive=settings.ollama_keep_alive,
             )
             _ok(f"loaded in {warm.load_s:.2f}s")
+
+            if cached:
+                print("\nPriming cached benchmark prompt (excluded from results)")
+                await probe.generate(
+                    settings.llm_model,
+                    BENCH_PROMPT,
+                    think=settings.llm_think,
+                    keep_alive=settings.ollama_keep_alive,
+                )
+                _ok("benchmark prompt primed")
 
             print(f"\nBenchmark ({mode}): {runs} warm runs")
             results: list[GenerationStats] = []
