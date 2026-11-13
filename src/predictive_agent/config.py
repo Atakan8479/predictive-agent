@@ -30,6 +30,9 @@ class Settings(BaseSettings):
 
     # --- Local infrastructure ---------------------------------------------
     toxiproxy_api_port: int = Field(default=8474, ge=1, le=65535)
+    mock_llm_base_latency_ms: float = Field(default=5.0, ge=0)
+    mock_llm_prefill_tps: float = Field(default=960.0, gt=0)
+    mock_llm_decode_tps: float = Field(default=67.0, gt=0)
 
     # --- Feature flags -----------------------------------------------------
     prefetch_enabled: bool = False

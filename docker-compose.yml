@@ -1,6 +1,26 @@
 name: predictive-agent
 
 services:
+  mock-llm:
+    image: predictive-agent/mock-llm:0.1.0
+    build:
+      context: .
+      dockerfile: mocks/llm/Dockerfile
+    ports:
+      - "${PA_INFRA_BIND_ADDRESS:-127.0.0.1}:${PA_MOCK_LLM_PORT:-8090}:8200"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/app/.venv/bin/python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8200/healthz', timeout=1).read()",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
   mock-apis:
     image: predictive-agent/mock-apis:0.1.0
     build:
