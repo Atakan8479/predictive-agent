@@ -21,6 +21,31 @@ uv sync
 uv run pre-commit install
 ```
 
+## Local infrastructure
+
+Docker Desktop must be running with WSL2 integration enabled. Start the M1 infrastructure stack
+and wait up to 60 seconds for every service to become healthy:
+
+```bash
+make up
+make ps
+```
+
+The default host endpoints are:
+
+| Service | Endpoint | Purpose |
+|---|---|---|
+| Valkey | `redis://localhost:6379` | Persistent cache |
+| NATS | `nats://localhost:4222` | JetStream event bus |
+| NATS monitoring | `http://localhost:8222` | Health and JetStream diagnostics |
+| Toxiproxy API | `http://localhost:8474` | Proxy management; profiles arrive in M1.4 |
+| Jaeger OTLP | `localhost:4317` (gRPC), `http://localhost:4318` (HTTP) | Trace ingestion |
+| Jaeger UI | `http://localhost:16686` | Trace inspection |
+
+Host binding and ports can be changed through the `PA_INFRA_*`, `PA_VALKEY_PORT`, `PA_NATS_*`,
+`PA_TOXIPROXY_*`, and `PA_JAEGER_*` values in `.env`. Valkey and NATS data use named volumes and
+survive `make down`. Use `make logs` to follow service logs and `make down` to stop the stack.
+
 ## Environment check and LLM baseline
 
 ```bash
