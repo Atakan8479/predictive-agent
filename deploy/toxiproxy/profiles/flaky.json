@@ -1,0 +1,26 @@
+{
+  "name": "flaky",
+  "toxics": [
+    {
+      "name": "latency",
+      "type": "latency",
+      "stream": "downstream",
+      "toxicity": 1.0,
+      "attributes": {"latency": 200, "jitter": 50}
+    },
+    {
+      "name": "connection_failure",
+      "type": "reset_peer",
+      "stream": "downstream",
+      "toxicity": 0.05,
+      "attributes": {"timeout": 0}
+    },
+    {
+      "name": "timeout",
+      "type": "timeout",
+      "stream": "downstream",
+      "toxicity": 0.02,
+      "attributes": {"timeout": 10000}
+    }
+  ]
+}

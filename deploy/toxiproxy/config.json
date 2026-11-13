@@ -1,1 +1,8 @@
-[]
+[
+  {
+    "name": "mock-apis",
+    "listen": "0.0.0.0:18100",
+    "upstream": "mock-apis:8100",
+    "enabled": true
+  }
+]

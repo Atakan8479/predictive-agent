@@ -9,5 +9,5 @@ RUN uv sync --locked --no-dev --no-editable
 COPY mocks ./mocks
 
 USER 65534:65534
-EXPOSE 8080
-CMD ["/app/.venv/bin/uvicorn", "mocks.apis.app:app", "--host", "0.0.0.0", "--port", "8080"]
+EXPOSE 8100
+CMD ["/app/.venv/bin/uvicorn", "mocks.apis.app:app", "--host", "0.0.0.0", "--port", "8100"]

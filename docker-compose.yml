@@ -7,14 +7,14 @@ services:
       context: .
       dockerfile: mocks/apis/Dockerfile
     ports:
-      - "${PA_INFRA_BIND_ADDRESS:-127.0.0.1}:${PA_MOCK_APIS_PORT:-8080}:8080"
+      - "${PA_INFRA_BIND_ADDRESS:-127.0.0.1}:${PA_MOCK_APIS_PORT:-8080}:8100"
     healthcheck:
       test:
         [
           "CMD",
           "/app/.venv/bin/python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=1).read()",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/healthz', timeout=1).read()",
         ]
       interval: 2s
       timeout: 2s
@@ -55,6 +55,7 @@ services:
     command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
     ports:
       - "${PA_INFRA_BIND_ADDRESS:-127.0.0.1}:${PA_TOXIPROXY_API_PORT:-8474}:8474"
+      - "${PA_INFRA_BIND_ADDRESS:-127.0.0.1}:${PA_TOXIPROXY_MOCK_APIS_PORT:-18100}:18100"
     volumes:
       - ./deploy/toxiproxy/config.json:/config/toxiproxy.json:ro
     healthcheck:

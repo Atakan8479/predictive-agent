@@ -1,7 +1,7 @@
-.PHONY: up down logs ps
+.PHONY: up down logs ps profile
 
 up:
-	docker compose up -d --wait --wait-timeout 60
+	docker compose up --build -d --wait --wait-timeout 60
 
 down:
 	docker compose down
@@ -11,3 +11,7 @@ logs:
 
 ps:
 	docker compose ps
+
+profile:
+	@test -n "$(P)" || (echo "Usage: make profile P=<fast|typical|slow|flaky>" >&2; exit 2)
+	uv run pa-toxiproxy apply "$(P)"
