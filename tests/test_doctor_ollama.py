@@ -3,11 +3,12 @@ import json
 import httpx
 import pytest
 
-from predictive_agent.doctor.ollama import GenerationStats, OllamaProbe
+from predictive_agent.doctor.ollama import GenerationStats, OllamaProbe, OllamaResponseError
 
 GENERATE_RESPONSE = {
     "load_duration": 2_000_000_000,
     "prompt_eval_count": 400,
+    "prompt_eval_cached_count": 125,
     "prompt_eval_duration": 200_000_000,
     "eval_count": 120,
     "eval_duration": 2_000_000_000,
@@ -47,11 +48,27 @@ async def test_generate_parses_timings(probe: OllamaProbe) -> None:
     s = await probe.generate("qwen3.5:9b-q4_K_M", "hi", think=False, keep_alive="5m")
     assert s.load_s == pytest.approx(2.0)
     assert s.prompt_tokens_per_s == pytest.approx(2000.0)
+    assert s.prompt_cached_tokens == 125
     assert s.output_tokens_per_s == pytest.approx(60.0)
     assert s.total_s == pytest.approx(4.3)
 
 
 def test_zero_durations_do_not_divide_by_zero() -> None:
-    s = GenerationStats.from_response({})
+    s = GenerationStats.from_response(
+        {
+            "load_duration": 0,
+            "prompt_eval_count": 0,
+            "prompt_eval_duration": 0,
+            "eval_count": 0,
+            "eval_duration": 0,
+            "total_duration": 0,
+        }
+    )
     assert s.prompt_tokens_per_s == 0.0
     assert s.output_tokens_per_s == 0.0
+    assert s.prompt_cached_tokens is None
+
+
+def test_missing_generate_metrics_are_rejected() -> None:
+    with pytest.raises(OllamaResponseError, match="prompt_eval_count"):
+        GenerationStats.from_response({"load_duration": 0})
