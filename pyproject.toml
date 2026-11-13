@@ -5,9 +5,11 @@ description = "Event-driven, async LLM agent orchestration with predictive tool 
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
+    "fastapi>=0.162.5",
     "httpx>=0.28.1",
     "pydantic>=2.14.3",
     "pydantic-settings>=2.16.2",
+    "uvicorn>=0.54.0",
 ]
 
 [project.scripts]
@@ -33,7 +35,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src", "mocks", "tests"]
 
 [tool.ruff.lint]
 select = [
@@ -52,7 +54,7 @@ allowed-confusables = ["ı"]
 
 # ---------------------------------------------------------------- pyright
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "mocks", "tests"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 venvPath = "."
@@ -62,6 +64,8 @@ reportMissingTypeStubs = false
 # ---------------------------------------------------------------- pytest
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra --strict-markers"
+markers = ["integration: requires the local Docker Compose stack"]

@@ -41,10 +41,12 @@ The default host endpoints are:
 | Toxiproxy API | `http://localhost:8474` | Proxy management; profiles arrive in M1.4 |
 | Jaeger OTLP | `localhost:4317` (gRPC), `http://localhost:4318` (HTTP) | Trace ingestion |
 | Jaeger UI | `http://localhost:16686` | Trace inspection |
+| Mock APIs | `http://localhost:8080` | Deterministic OMS, shipping, CRM, policy, and inventory data |
 
 Host binding and ports can be changed through the `PA_INFRA_*`, `PA_VALKEY_PORT`, `PA_NATS_*`,
-`PA_TOXIPROXY_*`, and `PA_JAEGER_*` values in `.env`. Valkey and NATS data use named volumes and
-survive `make down`. Use `make logs` to follow service logs and `make down` to stop the stack.
+`PA_TOXIPROXY_*`, `PA_JAEGER_*`, and `PA_MOCK_APIS_PORT` values in `.env`. Valkey and NATS data use
+named volumes and survive `make down`. Use `make logs` to follow service logs and `make down` to
+stop the stack.
 
 ## Environment check and LLM baseline
 
