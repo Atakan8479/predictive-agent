@@ -1,0 +1,62 @@
+name: predictive-agent
+
+services:
+  valkey:
+    image: valkey/valkey:9.1.3-alpine
+    command: ["valkey-server", "--appendonly", "yes"]
+    ports:
+      - "${PA_INFRA_BIND_ADDRESS:-127.0.0.1}:${PA_VALKEY_PORT:-6379}:6379"
+    volumes:
+      - valkey-data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
+  nats:
+    image: nats:2.15.3-alpine
+    command: ["-js", "-m", "8222", "--store_dir", "/data"]
+    ports:
+      - "${PA_INFRA_BIND_ADDRESS:-127.0.0.1}:${PA_NATS_PORT:-4222}:4222"
+      - "${PA_INFRA_BIND_ADDRESS:-127.0.0.1}:${PA_NATS_MONITOR_PORT:-8222}:8222"
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz?js-enabled-only=true"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.13.0
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    ports:
+      - "${PA_INFRA_BIND_ADDRESS:-127.0.0.1}:${PA_TOXIPROXY_API_PORT:-8474}:8474"
+    volumes:
+      - ./deploy/toxiproxy/config.json:/config/toxiproxy.json:ro
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.23.0
+    ports:
+      - "${PA_INFRA_BIND_ADDRESS:-127.0.0.1}:${PA_JAEGER_UI_PORT:-16686}:16686"
+      - "${PA_INFRA_BIND_ADDRESS:-127.0.0.1}:${PA_JAEGER_OTLP_GRPC_PORT:-4317}:4317"
+      - "${PA_INFRA_BIND_ADDRESS:-127.0.0.1}:${PA_JAEGER_OTLP_HTTP_PORT:-4318}:4318"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:13133/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  valkey-data:
+  nats-data:
