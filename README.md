@@ -60,6 +60,18 @@ uv run pa-toxiproxy reset
 Available profiles are `fast` (50±10 ms), `typical` (200±50 ms), `slow` (800±200 ms), and
 `flaky` (typical latency plus 5% connection resets and 2% timeouts). Latency is applied only to
 the downstream response stream, so a profile's latency is its target contribution to request RTT.
+The flaky probabilities control Toxiproxy toxic activation at the TCP connection level; they are
+not guaranteed HTTP request failure percentages. Keep-alive and connection reuse can materially
+change observed request-level rates.
+
+Both Docker Compose and `pa-toxiproxy` read `PA_TOXIPROXY_API_PORT` from the repository `.env`.
+An explicit process environment variable overrides the dotenv value. Invalid ports are rejected
+before the management client connects.
+
+Toxiproxy profile changes use sequential HTTP operations and are not atomic. After applying a
+profile, the client verifies the complete active toxic set. Any application or verification error
+triggers a best-effort reset to no toxics; if that cleanup also fails, the CLI reports both errors
+and does not report the profile as active.
 
 ## Environment check and LLM baseline
 
