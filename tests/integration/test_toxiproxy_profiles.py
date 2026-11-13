@@ -1,6 +1,8 @@
-import asyncio
+import json
 import os
-from collections import Counter
+import platform
+import sys
+from importlib.metadata import version
 from statistics import median
 from time import perf_counter
 
@@ -11,6 +13,11 @@ from predictive_agent.bench.toxiproxy import (
     ToxiproxyClient,
     load_profile,
     toxiproxy_api_url,
+)
+from predictive_agent.bench.toxiproxy_diagnostics import (
+    measure_independent_connections,
+    run_isolated_condition,
+    summarize_attempts,
 )
 
 pytestmark = pytest.mark.integration
@@ -67,46 +74,57 @@ async def _measure_rtts(client: httpx.AsyncClient, count: int) -> list[float]:
     os.getenv("PA_RUN_INTEGRATION") != "1" or os.getenv("PA_RUN_FLAKY_EXPERIMENT") != "1",
     reason="set PA_RUN_INTEGRATION=1 and PA_RUN_FLAKY_EXPERIMENT=1",
 )
-async def test_flaky_profile_records_independent_connection_outcomes() -> None:
+async def test_fault_profiles_produce_controlled_diagnostics() -> None:
     proxy_port = os.getenv("PA_TOXIPROXY_MOCK_APIS_PORT", "18100")
-    attempts = 100
-    semaphore = asyncio.Semaphore(20)
+    attempts = int(os.getenv("PA_FLAKY_DIAGNOSTIC_ATTEMPTS", "30"))
+    concurrency = int(os.getenv("PA_FLAKY_DIAGNOSTIC_CONCURRENCY", "5"))
+    # The read timeout exceeds the 10 s timeout toxic so injected stalls are measured, not
+    # automatically mislabeled as client failures.
+    timeout = httpx.Timeout(connect=2.0, read=12.0, write=2.0, pool=2.0)
+    conditions = (
+        ("baseline", None),
+        ("latency_only", load_profile("typical")),
+        ("flaky", load_profile("flaky")),
+    )
+    summaries: list[dict[str, object]] = []
 
     async with ToxiproxyClient(toxiproxy_api_url()) as toxiproxy:
-        await toxiproxy.apply(load_profile("flaky"))
-        try:
-            outcomes = await asyncio.gather(
-                *(_attempt_independent_connection(proxy_port, semaphore) for _ in range(attempts))
+        for condition, profile in conditions:
+            started = perf_counter()
+            results = await run_isolated_condition(
+                toxiproxy,
+                profile,
+                lambda: measure_independent_connections(
+                    f"http://127.0.0.1:{proxy_port}",
+                    attempts=attempts,
+                    concurrency=concurrency,
+                    request_timeout=timeout,
+                ),
             )
-        finally:
-            await toxiproxy.reset()
-
-    counts = Counter(outcomes)
-    print(
-        "flaky profile observations: "
-        f"attempts={attempts}, success={counts['success']}, resets={counts['reset']}, "
-        f"timeouts={counts['timeout']}, other_failures={counts['other_failure']}"
-    )
-    assert counts.total() == attempts
-
-
-async def _attempt_independent_connection(proxy_port: str, semaphore: asyncio.Semaphore) -> str:
-    timeout = httpx.Timeout(1.5, connect=0.5)
-    limits = httpx.Limits(max_connections=1, max_keepalive_connections=0)
-    async with semaphore:
-        try:
-            async with httpx.AsyncClient(
-                base_url=f"http://127.0.0.1:{proxy_port}",
-                headers={"Connection": "close"},
-                limits=limits,
+            summary = summarize_attempts(
+                condition,
+                profile,
+                results,
+                attempts=attempts,
+                concurrency=concurrency,
                 timeout=timeout,
-            ) as client:
-                response = await client.get("/healthz")
-                response.raise_for_status()
-        except httpx.TimeoutException:
-            return "timeout"
-        except httpx.TransportError:
-            return "reset"
-        except httpx.HTTPError:
-            return "other_failure"
-    return "success"
+                elapsed_seconds=perf_counter() - started,
+            )
+            summaries.append(summary.as_dict())
+            assert sum(summary.outcomes.values()) == attempts
+
+    print(
+        json.dumps(
+            {
+                "runtime": {
+                    "python": sys.version.split()[0],
+                    "httpx": version("httpx"),
+                    "platform": platform.platform(),
+                    "toxiproxy": "2.13.0",
+                },
+                "conditions": summaries,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )

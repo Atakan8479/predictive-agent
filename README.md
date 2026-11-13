@@ -73,6 +73,12 @@ profile, the client verifies the complete active toxic set. Any application or v
 triggers a best-effort reset to no toxics; if that cleanup also fails, the CLI reports both errors
 and does not report the profile as active.
 
+For reproducible failure diagnostics, the opt-in integration experiment compares a clean baseline,
+`typical`, and `flaky` with independent TCP connections, exact HTTPX error categories, verified
+profile isolation, and structured JSON output. See `deploy/toxiproxy/profiles/README.md` for the
+command and bounded concurrency controls. Its read timeout is intentionally longer than the
+10-second timeout toxic; configured toxicity is never interpreted as a guaranteed request rate.
+
 ## Environment check and LLM baseline
 
 ```bash
