@@ -54,6 +54,7 @@ def test_summary_counts_outcomes_and_rtts() -> None:
     )
 
     assert summary.outcomes == {"read_timeout": 1, "success": 2}
+    assert summary.error_types == {"ReadTimeout": 1}
     assert summary.successful_rtt_seconds == {"median": 0.2, "p95": 0.3, "max": 0.3}
 
 
@@ -83,6 +84,7 @@ def test_summary_handles_empty_sample() -> None:
     )
 
     assert summary.outcomes == {}
+    assert summary.error_types == {}
     assert summary.successful_rtt_seconds is None
 
 

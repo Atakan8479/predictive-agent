@@ -42,6 +42,7 @@ class DiagnosticSummary:
     concurrency: int
     timeout_seconds: dict[str, float]
     outcomes: dict[str, int]
+    error_types: dict[str, int]
     successful_rtt_seconds: dict[str, float] | None
     elapsed_seconds: float
 
@@ -119,6 +120,9 @@ def summarize_attempts(
             "pool": _required_timeout(timeout.pool),
         },
         outcomes=dict(sorted(Counter(result.outcome for result in results).items())),
+        error_types=dict(
+            sorted(Counter(result.detail for result in results if result.detail).items())
+        ),
         successful_rtt_seconds=rtt_summary,
         elapsed_seconds=elapsed_seconds,
     )
