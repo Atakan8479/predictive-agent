@@ -8,6 +8,14 @@ from pydantic import BaseModel
 
 SEED = 20261113
 
+# An order cannot advance beyond its shipment or report delivery before the shipment does.
+ORDER_TO_SHIPMENT_STATUS = {
+    "processing": "label_created",
+    "paid": "label_created",
+    "shipped": "in_transit",
+    "delivered": "delivered",
+}
+
 
 class OrderItem(BaseModel):
     sku: str
@@ -112,10 +120,12 @@ def build_data(seed: int = SEED) -> MockData:
             )
             for sku in rng.sample(product_ids, rng.randint(1, 4))
         ]
+        customer_id = rng.choice(customer_ids)
+        order_status = rng.choice(tuple(ORDER_TO_SHIPMENT_STATUS))
         orders[order_id] = Order(
             order_id=order_id,
-            customer_id=rng.choice(customer_ids),
-            status=rng.choice(("processing", "paid", "shipped", "delivered")),
+            customer_id=customer_id,
+            status=order_status,
             ordered_at=ordered_at,
             currency="USD",
             total=round(sum(item.quantity * item.unit_price for item in items), 2),
@@ -126,7 +136,7 @@ def build_data(seed: int = SEED) -> MockData:
             order_id=order_id,
             carrier=rng.choice(("DHL", "FedEx", "UPS")),
             tracking_number=f"TRK{seed}{index:06d}",
-            status=rng.choice(("label_created", "in_transit", "delivered")),
+            status=ORDER_TO_SHIPMENT_STATUS[order_status],
             estimated_delivery=ordered_at + timedelta(days=rng.randint(2, 8)),
         )
 
