@@ -9,9 +9,9 @@ def test_defaults_target_local_ollama_with_prefetch_off() -> None:
     s = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
     assert s.llm_base_url == "http://localhost:11434/v1"
     assert s.llm_think is False
-    assert s.mock_llm_base_latency_ms == pytest.approx(83.783)
-    assert s.mock_llm_prefill_tps == pytest.approx(3422.979)
-    assert s.mock_llm_decode_tps == pytest.approx(66.979)
+    assert s.mock_llm_base_latency_ms == pytest.approx(94.775)
+    assert s.mock_llm_prefill_tps == pytest.approx(3146.301)
+    assert s.mock_llm_decode_tps == pytest.approx(65.790)
     assert s.prefetch_enabled is False
 
 

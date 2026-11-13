@@ -4,13 +4,19 @@ from dataclasses import dataclass
 
 from predictive_agent.config import Settings
 
-TOKEN_INTERCEPT = 23.803577942524498
-PLAIN_CHARACTER_COEFFICIENT = 0.18265836563647864
-PUNCTUATION_COEFFICIENT = 0.6422025355541184
-NON_ASCII_COEFFICIENT = 0.784786165251065
+TOKEN_INTERCEPT = 36.757288119157025
+PLAIN_CHARACTER_COEFFICIENT = 0.18303445239788455
+PUNCTUATION_COEFFICIENT = 0.6880185556557008
+NON_ASCII_COEFFICIENT = 0.7512997579514635
+EXTRA_MESSAGE_COEFFICIENT = 16.340529833802805
+TOOL_COEFFICIENT = 111.80463131999849
 
 
 def estimate_tokens(text: str) -> int:
+    return estimate_prompt_tokens(text)
+
+
+def estimate_prompt_tokens(text: str, *, message_count: int = 1, tool_count: int = 0) -> int:
     non_ascii = sum(not character.isascii() for character in text)
     punctuation = sum(
         character.isascii() and not character.isalnum() and not character.isspace()
@@ -22,6 +28,8 @@ def estimate_tokens(text: str) -> int:
         + plain * PLAIN_CHARACTER_COEFFICIENT
         + punctuation * PUNCTUATION_COEFFICIENT
         + non_ascii * NON_ASCII_COEFFICIENT
+        + max(0, message_count - 1) * EXTRA_MESSAGE_COEFFICIENT
+        + max(0, tool_count) * TOOL_COEFFICIENT
     )
     return max(1, round(estimate))
 

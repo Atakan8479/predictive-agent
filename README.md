@@ -81,8 +81,13 @@ command and bounded concurrency controls. Its read timeout is intentionally long
 10-second timeout toxic; configured toxicity is never interpreted as a guaranteed request rate.
 
 The mock LLM supports regular and SSE `POST /v1/chat/completions` responses, deterministic
-function-tool calls, and final answers after tool results. Its measured character-class token
-regression and timing calibration are documented in `docs/benchmarks/mock-llm-calibration.md`.
+schema-valid calls for `get_order`, `get_shipment`, `get_customer`, `get_policy`, and `get_product`,
+and final answers after tool results. Missing, ambiguous, or unsupported arguments produce an
+explicit deterministic text fallback. `max_tokens` and `max_completion_tokens` limit text with a
+`length` finish reason; a budget too small for complete tool-call JSON returns HTTP 400. Unknown
+request fields and conflicting token-limit fields return HTTP 422. Its held-out streaming
+calibration, including the documented Ollama tool-call TTFT limitation, is in
+`docs/benchmarks/mock-llm-calibration.md`.
 Override timing per request with `X-Mock-LLM-Base-Latency-Ms`,
 `X-Mock-LLM-Prefill-TPS`, and `X-Mock-LLM-Decode-TPS`.
 
