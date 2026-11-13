@@ -1,0 +1,12 @@
+{
+  "name": "fast",
+  "toxics": [
+    {
+      "name": "latency",
+      "type": "latency",
+      "stream": "downstream",
+      "toxicity": 1.0,
+      "attributes": {"latency": 50, "jitter": 10}
+    }
+  ]
+}
