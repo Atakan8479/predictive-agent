@@ -43,9 +43,10 @@ The default host endpoints are:
 | Jaeger OTLP | `localhost:4317` (gRPC), `http://localhost:4318` (HTTP) | Trace ingestion |
 | Jaeger UI | `http://localhost:16686` | Trace inspection |
 | Mock APIs | `http://localhost:8080` | Deterministic OMS, shipping, CRM, policy, and inventory data |
+| Mock LLM | `http://localhost:8090/v1` | Calibrated OpenAI-compatible Chat Completions |
 
 Host binding and ports can be changed through the `PA_INFRA_*`, `PA_VALKEY_PORT`, `PA_NATS_*`,
-`PA_TOXIPROXY_*`, `PA_JAEGER_*`, and `PA_MOCK_APIS_PORT` values in `.env`. Valkey and NATS data use
+`PA_TOXIPROXY_*`, `PA_JAEGER_*`, and `PA_MOCK_*` values in `.env`. Valkey and NATS data use
 named volumes and survive `make down`. Use `make logs` to follow service logs and `make down` to
 stop the stack.
 
@@ -78,6 +79,12 @@ For reproducible failure diagnostics, the opt-in integration experiment compares
 profile isolation, and structured JSON output. See `deploy/toxiproxy/profiles/README.md` for the
 command and bounded concurrency controls. Its read timeout is intentionally longer than the
 10-second timeout toxic; configured toxicity is never interpreted as a guaranteed request rate.
+
+The mock LLM supports regular and SSE `POST /v1/chat/completions` responses, deterministic
+function-tool calls, and final answers after tool results. Its measured character-class token
+regression and timing calibration are documented in `docs/benchmarks/mock-llm-calibration.md`.
+Override timing per request with `X-Mock-LLM-Base-Latency-Ms`,
+`X-Mock-LLM-Prefill-TPS`, and `X-Mock-LLM-Decode-TPS`.
 
 ## Environment check and LLM baseline
 
