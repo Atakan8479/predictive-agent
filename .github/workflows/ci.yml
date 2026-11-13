@@ -22,6 +22,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      - name: Validate Compose
+        run: docker compose config --quiet
+
       - name: Lint
         run: uv run ruff check .
 
