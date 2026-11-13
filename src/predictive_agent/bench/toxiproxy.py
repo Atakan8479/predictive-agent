@@ -2,13 +2,14 @@
 
 import argparse
 import asyncio
-import os
 from pathlib import Path
 from types import TracebackType
 from typing import Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from predictive_agent.config import Settings
 
 PROXY_NAME = "mock-apis"
 PROFILES_DIR = Path(__file__).parents[3] / "deploy" / "toxiproxy" / "profiles"
@@ -35,6 +36,27 @@ class ProxyState(BaseModel):
     upstream: str
     enabled: bool
     toxics: list[ToxicDefinition]
+
+
+class ProfileVerificationError(RuntimeError):
+    """The active proxy state does not match the requested safe state."""
+
+
+class ProfileApplyError(RuntimeError):
+    """Profile application failed and cleanup may also have failed."""
+
+    def __init__(
+        self,
+        profile_name: str,
+        apply_error: Exception,
+        cleanup_error: Exception | None = None,
+    ) -> None:
+        message = f"Failed to apply profile {profile_name!r}: {apply_error}"
+        if cleanup_error is not None:
+            message += f"; cleanup also failed: {cleanup_error}"
+        super().__init__(message)
+        self.apply_error = apply_error
+        self.cleanup_error = cleanup_error
 
 
 def load_profile(name: str, profiles_dir: Path = PROFILES_DIR) -> ProfileDefinition:
@@ -85,26 +107,44 @@ class ToxiproxyClient:
         for toxic in proxy.toxics:
             response = await self._client.delete(f"/proxies/{PROXY_NAME}/toxics/{toxic.name}")
             response.raise_for_status()
-        return await self.inspect()
+        state = await self.inspect()
+        if state.toxics:
+            raise ProfileVerificationError(
+                f"Reset left active toxics: {[toxic.name for toxic in state.toxics]}"
+            )
+        return state
 
     async def apply(self, profile: ProfileDefinition) -> ProxyState:
         await self.reset()
-        for toxic in profile.toxics:
-            response = await self._client.post(
-                f"/proxies/{PROXY_NAME}/toxics",
-                json=toxic.model_dump(mode="json", by_alias=True),
-            )
-            response.raise_for_status()
-        return await self.inspect()
+        try:
+            for toxic in profile.toxics:
+                response = await self._client.post(
+                    f"/proxies/{PROXY_NAME}/toxics",
+                    json=toxic.model_dump(mode="json", by_alias=True),
+                )
+                response.raise_for_status()
+            state = await self.inspect()
+            if state.toxics != profile.toxics:
+                raise ProfileVerificationError(
+                    f"Active toxics do not match profile {profile.name!r}"
+                )
+            return state
+        except Exception as apply_error:
+            cleanup_error: Exception | None = None
+            try:
+                await self.reset()
+            except Exception as error:
+                cleanup_error = error
+            raise ProfileApplyError(profile.name, apply_error, cleanup_error) from apply_error
 
 
-def _api_url() -> str:
-    port = os.getenv("PA_TOXIPROXY_API_PORT", "8474")
-    return f"http://127.0.0.1:{port}"
+def toxiproxy_api_url(settings: Settings | None = None) -> str:
+    resolved = settings or Settings()
+    return f"http://127.0.0.1:{resolved.toxiproxy_api_port}"
 
 
 async def _run(action: str, profile_name: str | None) -> None:
-    async with ToxiproxyClient(_api_url()) as client:
+    async with ToxiproxyClient(toxiproxy_api_url()) as client:
         if action == "apply":
             if profile_name is None:
                 raise ValueError("apply requires a profile name")
@@ -123,4 +163,13 @@ def main() -> None:
     args = parser.parse_args()
     if args.action == "apply" and args.profile is None:
         parser.error("apply requires a profile name")
-    asyncio.run(_run(args.action, args.profile))
+    try:
+        asyncio.run(_run(args.action, args.profile))
+    except (
+        httpx.HTTPError,
+        ProfileApplyError,
+        ProfileVerificationError,
+        ValidationError,
+        ValueError,
+    ) as error:
+        parser.exit(1, f"error: {error}\n")

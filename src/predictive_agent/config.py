@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     ollama_url: str = "http://localhost:11434"
     ollama_keep_alive: str = "30m"  # avoid cold reloads skewing latency measurements
 
+    # --- Local infrastructure ---------------------------------------------
+    toxiproxy_api_port: int = Field(default=8474, ge=1, le=65535)
+
     # --- Feature flags -----------------------------------------------------
     prefetch_enabled: bool = False
 
