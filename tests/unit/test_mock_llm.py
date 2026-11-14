@@ -166,7 +166,7 @@ async def test_supported_tools_receive_executable_arguments(
     ("prompt", "expected_fragment"),
     [
         ("Show my order", "order_id is missing"),
-        ("Compare ORD-0001 and ORD-0002", "order_id is ambiguous"),
+        ("Compare order ORD-0001 and ORD-0002", "order_id is ambiguous"),
     ],
 )
 async def test_unsafe_tool_calls_return_explicit_fallback(
@@ -237,6 +237,48 @@ async def test_overlapping_order_and_shipment_intent_selects_shipment(
     assert call["function"]["name"] == "get_shipment"
 
 
+async def test_intended_tool_is_not_replaced_by_tool_with_available_identifier(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Get the customer information associated with order ORD-0042.",
+                }
+            ],
+            "tools": [_tool("get_order"), _tool("get_customer")],
+        },
+    )
+
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert "customer_id is missing" in choice["message"]["content"]
+    assert "tool_calls" not in choice["message"]
+
+
+async def test_incidental_identifier_without_tool_intent_does_not_trigger_call(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Remember ORD-0042 and say hello."}],
+            "tools": [_tool("get_order")],
+        },
+    )
+
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == "Mock response complete."
+
+
 async def test_auto_skips_tools_when_current_request_has_no_external_intent(
     client: httpx.AsyncClient,
 ) -> None:
@@ -289,6 +331,21 @@ async def test_required_and_named_tool_failures_are_explicit(client: httpx.Async
     assert "order_id is missing" in required.json()["detail"]
     assert named.status_code == 400
     assert "unsupported tool" in named.json()["detail"]
+
+
+async def test_duplicate_tool_function_names_are_rejected(client: httpx.AsyncClient) -> None:
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Show order ORD-0042"}],
+            "tools": [_tool("get_order"), _tool("get_order")],
+        },
+    )
+
+    assert response.status_code == 422
+    assert "tool function names must be unique" in response.text
 
 
 async def test_new_user_turn_ignores_historical_tool_result_and_identifiers(
@@ -454,6 +511,32 @@ async def test_supported_schema_constraints_generate_valid_boundary_values(
     }
 
 
+async def test_json_schema_pattern_uses_search_semantics(client: httpx.AsyncClient) -> None:
+    tool = _tool("get_order")
+    parameters = tool["function"]["parameters"]
+    parameters["properties"]["region"] = {
+        "type": "string",
+        "const": "prefix-EU-suffix",
+        "pattern": "EU",
+    }
+    parameters["required"].append("region")
+
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Show order ORD-0042"}],
+            "tools": [tool],
+        },
+    )
+
+    arguments = json.loads(
+        response.json()["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+    )
+    assert arguments["region"] == "prefix-EU-suffix"
+
+
 @pytest.mark.parametrize(
     ("schema_update", "expected"),
     [
@@ -464,6 +547,11 @@ async def test_supported_schema_constraints_generate_valid_boundary_values(
         ({"type": "number", "default": 1, "minimum": 2}, "does not satisfy"),
         ({"type": "boolean", "default": 1}, "does not satisfy"),
         ({"type": "string", "enum": []}, "enum must be a non-empty array"),
+        ({"type": "string", "enum": None}, "enum must be a non-empty array"),
+        ({"type": "string", "const": "x", "pattern": None}, "pattern must be a string"),
+        ({"type": "string", "const": "x", "maxLength": None}, "maxLength must be"),
+        ({"type": "number", "default": 1, "minimum": None}, "minimum must be a finite"),
+        ({"type": "boolean", "default": True, "enum": [1]}, "does not satisfy"),
     ],
 )
 async def test_malformed_or_unsatisfied_schema_constraints_are_explicit(
@@ -767,6 +855,6 @@ def test_timing_model_uses_settings_and_overrides() -> None:
         settings, base_latency_ms=10.0, prefill_tps=100.0, decode_tps=20.0
     )
 
-    assert calibrated.base_latency_ms == pytest.approx(75.460)
+    assert calibrated.base_latency_ms == pytest.approx(77.282)
     assert overridden.ttft_seconds(50) == pytest.approx(0.51)
     assert overridden.total_seconds(50, 10) == pytest.approx(1.01)

@@ -7,20 +7,20 @@ from typing import Any, cast
 
 from predictive_agent.config import Settings
 
-TOKEN_INTERCEPT = 16.812280022802952
-LETTER_COEFFICIENT = 0.0
-DIGIT_COEFFICIENT = 1.2122806074966093
-WHITESPACE_COEFFICIENT = 1.025593216335329
-PUNCTUATION_COEFFICIENT = 0.583400704871238
-NON_ASCII_COEFFICIENT = 0.924666587868699
-EXTRA_MESSAGE_COEFFICIENT = 21.648646430276557
-TOOL_CHARACTER_COEFFICIENT = 0.9415216672465215
-CONTENT_INTERCEPT = 3.1651549622832036
-CONTENT_LETTER_COEFFICIENT = 0.11195095763177693
-CONTENT_DIGIT_COEFFICIENT = 1.2041482823072511
-CONTENT_WHITESPACE_COEFFICIENT = 0.47882200942583003
-CONTENT_PUNCTUATION_COEFFICIENT = 0.5659700126215336
-CONTENT_NON_ASCII_COEFFICIENT = 1.135423696494941
+TOKEN_INTERCEPT = 18.662082305220835
+CHARACTER_COEFFICIENT = 0.22006418882681641
+DIGIT_COEFFICIENT = 0.8148146775512143
+WHITESPACE_COEFFICIENT = 0.0
+PUNCTUATION_COEFFICIENT = 0.16036956421032036
+NON_ASCII_COEFFICIENT = 0.3656497594221817
+EXTRA_MESSAGE_COEFFICIENT = 20.817746463304672
+TOOL_CHARACTER_COEFFICIENT = 0.9414132123103734
+CONTENT_INTERCEPT = 2.7584865354007917
+CONTENT_LETTER_COEFFICIENT = 0.09500734452574518
+CONTENT_DIGIT_COEFFICIENT = 1.3666025324527102
+CONTENT_WHITESPACE_COEFFICIENT = 0.563115619762561
+CONTENT_PUNCTUATION_COEFFICIENT = 0.5618685837139222
+CONTENT_NON_ASCII_COEFFICIENT = 1.0722155870654937
 TOOL_CONTENT_INTERCEPT = 0.0
 TOOL_CONTENT_LETTER_COEFFICIENT = 0.3238325441961192
 TOOL_CONTENT_DIGIT_COEFFICIENT = 2.066078556064583
@@ -117,8 +117,16 @@ def prompt_features(
     tool_text = json.dumps(
         _normalize(tools), ensure_ascii=False, separators=(",", ":"), sort_keys=True
     )
+    _, letters, digits, whitespace, punctuation, non_ascii = character_features(
+        "\n".join(message_parts)
+    )
     return (
-        *character_features("\n".join(message_parts)),
+        1.0,
+        letters + digits + whitespace + punctuation + non_ascii,
+        digits,
+        whitespace,
+        punctuation,
+        non_ascii,
         float(max(0, len(messages) - 1)),
         float(len(tool_text) if tools else 0),
     )
@@ -140,7 +148,7 @@ def estimate_prompt_tokens_for_payload(
 ) -> int:
     (
         _,
-        letters,
+        characters,
         digits,
         whitespace,
         punctuation,
@@ -150,7 +158,7 @@ def estimate_prompt_tokens_for_payload(
     ) = prompt_features(messages, tools)
     estimate = (
         TOKEN_INTERCEPT
-        + letters * LETTER_COEFFICIENT
+        + characters * CHARACTER_COEFFICIENT
         + digits * DIGIT_COEFFICIENT
         + whitespace * WHITESPACE_COEFFICIENT
         + punctuation * PUNCTUATION_COEFFICIENT

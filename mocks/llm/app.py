@@ -134,6 +134,9 @@ class ChatCompletionRequest(BaseModel):
             self.tool_choice == "required" or isinstance(self.tool_choice, NamedToolChoice)
         ) and not self.tools:
             raise ValueError("tool_choice requires at least one supplied tool")
+        tool_names = [tool.function.name for tool in self.tools or []]
+        if len(tool_names) != len(set(tool_names)):
+            raise ValueError("tool function names must be unique")
         pending_ids: set[str] = set()
         resolved_ids: set[str] = set()
         for message in self.messages:
@@ -346,33 +349,31 @@ def _select_tool(
     if requested_name is not None and not available:
         return None, None, f"Mock cannot call tool {requested_name!r}: it was not supplied."
 
-    candidates: list[tuple[ChatTool, dict[str, Any], int]] = []
-    failures: list[tuple[int, str]] = []
+    if requested_name is None:
+        scored = [(tool, _intent_score(tool.function.name, user_text)) for tool in available]
+        highest_score = max((score for _, score in scored), default=0)
+        if highest_score <= 0:
+            return None, None, None
+        available = [tool for tool, score in scored if score == highest_score]
+
+    candidates: list[tuple[ChatTool, dict[str, Any]]] = []
+    failures: list[str] = []
     for tool in available:
         result, failure = _tool_arguments(tool, user_text)
-        score = _intent_score(tool.function.name, user_text)
         if result is not None:
-            candidates.append((tool, result, score))
+            candidates.append((tool, result))
         elif failure is not None:
-            failures.append((score, failure))
+            failures.append(failure)
     if requested_name is not None and candidates:
-        tool, arguments, _ = candidates[0]
+        tool, arguments = candidates[0]
         return tool, arguments, None
     if len(candidates) == 1:
-        tool, arguments, _ = candidates[0]
+        tool, arguments = candidates[0]
         return tool, arguments, None
     if len(candidates) > 1:
-        highest_score = max(candidate[2] for candidate in candidates)
-        matching = [candidate for candidate in candidates if candidate[2] == highest_score]
-        if len(matching) == 1:
-            tool, arguments, _ = matching[0]
-            return tool, arguments, None
         return None, None, "Mock cannot call a tool safely: the request is ambiguous."
-    relevant_failures = [failure for score, failure in failures if score > 0]
-    if requested_name is not None and failures:
-        return None, None, failures[0][1]
-    if relevant_failures:
-        return None, None, relevant_failures[0]
+    if failures:
+        return None, None, failures[0]
     return None, None, None
 
 
@@ -381,9 +382,12 @@ def _intent_score(tool_name: str, text: str) -> int:
     if spec is None:
         return 0
     lowered = text.lower()
-    return int(spec[1].search(text) is not None) + sum(
-        len(re.findall(rf"\b{re.escape(keyword)}\b", lowered)) for keyword in spec[2]
-    )
+    matches = [
+        match for keyword in spec[2] for match in re.finditer(rf"\b{re.escape(keyword)}\b", lowered)
+    ]
+    if not matches:
+        return 0
+    return len(matches) * (len(text) + 1) + len(text) - min(match.start() for match in matches)
 
 
 def _tool_arguments(tool: ChatTool, text: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -495,7 +499,7 @@ def _validate_primitive_schema(schema: dict[str, Any]) -> str | None:
     if expected not in {"string", "integer", "number", "boolean", "null"}:
         return "must declare a supported primitive type."
     enum = schema.get("enum")
-    if enum is not None and (not isinstance(enum, list) or not enum):
+    if "enum" in schema and (not isinstance(enum, list) or not enum):
         return "enum must be a non-empty array."
     if expected != "string" and any(
         constraint in schema for constraint in ("pattern", "minLength", "maxLength")
@@ -510,14 +514,14 @@ def _validate_primitive_schema(schema: dict[str, Any]) -> str | None:
             or minimum_length < 0
         ):
             return "minLength must be a non-negative integer."
-        if maximum_length is not None and (
+        if "maxLength" in schema and (
             isinstance(maximum_length, bool)
             or not isinstance(maximum_length, int)
             or maximum_length < minimum_length
         ):
             return "maxLength must be an integer greater than or equal to minLength."
         pattern = schema.get("pattern")
-        if pattern is not None:
+        if "pattern" in schema:
             if not isinstance(pattern, str):
                 return "pattern must be a string."
             try:
@@ -532,7 +536,7 @@ def _validate_primitive_schema(schema: dict[str, Any]) -> str | None:
         minimum = schema.get("minimum")
         maximum = schema.get("maximum")
         for label, boundary in (("minimum", minimum), ("maximum", maximum)):
-            if boundary is not None and (
+            if label in schema and (
                 isinstance(boundary, bool)
                 or not isinstance(boundary, (int, float))
                 or not math.isfinite(boundary)
@@ -543,7 +547,11 @@ def _validate_primitive_schema(schema: dict[str, Any]) -> str | None:
     for source in ("const", "default"):
         if source in schema and _value_error(schema, schema[source]) is not None:
             return f"{source} does not satisfy its declared constraints."
-    if "const" in schema and "default" in schema and schema["const"] != schema["default"]:
+    if (
+        "const" in schema
+        and "default" in schema
+        and not _json_equal(schema["const"], schema["default"])
+    ):
         return "const and default must agree when both are present."
     return None
 
@@ -576,12 +584,14 @@ def _value_error(schema: dict[str, Any], value: Any) -> str | None:
     if not valid_type:
         return "type"
     enum = schema.get("enum")
-    if isinstance(enum, list) and value not in enum:
+    if isinstance(enum, list) and not any(
+        _json_equal(value, item) for item in cast(list[Any], enum)
+    ):
         return "enum"
-    if "const" in schema and value != schema["const"]:
+    if "const" in schema and not _json_equal(value, schema["const"]):
         return "const"
     pattern = schema.get("pattern")
-    if isinstance(pattern, str) and isinstance(value, str) and re.fullmatch(pattern, value) is None:
+    if isinstance(pattern, str) and isinstance(value, str) and re.search(pattern, value) is None:
         return "pattern"
     if isinstance(value, str):
         if len(value) < schema.get("minLength", 0):
@@ -590,6 +600,8 @@ def _value_error(schema: dict[str, Any], value: Any) -> str | None:
         if isinstance(maximum_length, int) and len(value) > maximum_length:
             return "maxLength"
     if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if not math.isfinite(value):
+            return "finite"
         minimum = schema.get("minimum")
         maximum = schema.get("maximum")
         if minimum is not None and value < minimum:
@@ -597,6 +609,14 @@ def _value_error(schema: dict[str, Any], value: Any) -> str | None:
         if maximum is not None and value > maximum:
             return "maximum"
     return None
+
+
+def _json_equal(left: Any, right: Any) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left == right
+    if left is None or right is None:
+        return left is None and right is None
+    return left == right
 
 
 def _normalize_identifier(name: str, value: str) -> str:

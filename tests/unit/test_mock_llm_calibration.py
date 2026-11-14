@@ -4,22 +4,24 @@ from typing import Any
 import httpx
 import pytest
 from mocks.llm.app import ChatCompletionRequest, prompt_tokens_for_request
-from mocks.llm.calibration import estimate_prompt_tokens_for_payload
+from mocks.llm.calibration import estimate_prompt_tokens_for_payload, prompt_features
 from scripts.calibrate_mock_llm import (
     estimator_text,
     fit_regression,
     measure_stream,
+    runtime_final_cases,
     summarize_errors,
     training_cases,
     validation_cases,
 )
+from scripts.validate_mock_llm_runtime import compare_pair, tool_calls_are_executable
 
 
 def test_training_and_heldout_cases_are_distinct_and_cover_agent_workloads() -> None:
     training = training_cases()
     heldout = validation_cases()
 
-    assert len(training) == 35
+    assert len(training) == 39
     assert len(heldout) == 10
     assert {case["name"] for case in training}.isdisjoint(case["name"] for case in heldout)
     assert {case["category"] for case in heldout} == {
@@ -31,7 +33,53 @@ def test_training_and_heldout_cases_are_distinct_and_cover_agent_workloads() -> 
         "tool-result-final",
     }
     assert any(case["tools"] and len(case["messages"]) > 1 for case in heldout)
-    assert len({estimator_text(case) for case in training + heldout}) == 45
+    assert len({estimator_text(case) for case in training + heldout}) == 49
+
+
+def test_runtime_final_cases_are_new_and_cover_paired_acceptance_scope() -> None:
+    final = runtime_final_cases()
+    prior_names = {case["name"] for case in training_cases() + validation_cases()}
+
+    assert len(final) == 12
+    assert prior_names.isdisjoint(case["name"] for case in final)
+    assert {case["category"] for case in final} == {
+        "english",
+        "turkish",
+        "code",
+        "json",
+        "conversation",
+        "tool-call",
+        "tool-result-final",
+        "multi-turn-tool",
+    }
+    assert sum(case["category"] == "tool-call" for case in final) == 5
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a" * 2048,
+        "abc123" * 320,
+        "predictive" * 200,
+        "ordinary natural language with several words " * 40,
+        'const payload = {"order_id":"ORD-0042"};' * 30,
+        '{"items":[{"sku":"SKU-0007"}]}' * 40,
+        "Doğrulanmış müşteri kaydını özetle. " * 40,
+    ],
+)
+def test_prompt_estimator_remains_length_sensitive_for_representative_text(text: str) -> None:
+    short = estimate_prompt_tokens_for_payload(
+        [{"role": "user", "content": text[: len(text) // 2]}]
+    )
+    long = estimate_prompt_tokens_for_payload([{"role": "user", "content": text}])
+
+    assert long > short
+
+
+def test_prompt_features_include_total_character_length() -> None:
+    features = prompt_features([{"role": "user", "content": "abc123 !"}])
+
+    assert features[1] == 8
 
 
 def test_runtime_and_calibration_prompt_features_are_identical() -> None:
@@ -100,3 +148,58 @@ def test_stream_measurement_uses_first_meaningful_content_and_final_metrics() ->
     )
     assert sample["observed_first_meaningful_seconds"] <= sample["observed_final_event_seconds"]
     assert sample["measured_decode_tps"] == pytest.approx(500.0)
+
+
+def test_paired_runtime_requires_complete_schema_valid_equivalent_action() -> None:
+    case = next(case for case in validation_cases() if case["name"] == "acceptance-tool-policy")
+    ollama_calls = [
+        {
+            "function": {
+                "name": "get_policy",
+                "arguments": {"policy_name": "returns"},
+            }
+        }
+    ]
+    mock_calls = [
+        {
+            "id": "call_mock",
+            "type": "function",
+            "function": {
+                "name": "get_policy",
+                "arguments": '{"policy_name":"returns"}',
+            },
+        }
+    ]
+    canonical = (
+        '[{"function":{"arguments":{"policy_name":"returns"},'
+        '"name":"get_policy"},"type":"function"}]'
+    )
+    ollama = {
+        "generated_tool_calls": ollama_calls,
+        "canonical_generated_output": canonical,
+        "observed_first_meaningful_seconds": 0.6,
+        "observed_tool_ready_seconds": 0.6,
+        "observed_total_seconds": 0.62,
+        "actual_output_tokens": 27,
+    }
+    mock = {
+        "generated_tool_calls": mock_calls,
+        "canonical_generated_output": canonical,
+        "observed_first_meaningful_seconds": 0.58,
+        "observed_tool_ready_seconds": 0.58,
+        "observed_total_seconds": 0.59,
+        "completion_tokens": 26,
+    }
+
+    assert tool_calls_are_executable(ollama_calls, case["tools"])
+    result = compare_pair(case, ollama, mock)
+    assert result["output_equivalence"] == "executable_action_equivalent"
+    assert result["tool_ready_comparable"] is True
+    assert result["output_token_difference"] == -1
+
+
+def test_paired_runtime_rejects_incomplete_tool_arguments() -> None:
+    case = next(case for case in validation_cases() if case["name"] == "acceptance-tool-policy")
+    calls = [{"function": {"name": "get_policy", "arguments": "{"}}]
+
+    assert not tool_calls_are_executable(calls, case["tools"])

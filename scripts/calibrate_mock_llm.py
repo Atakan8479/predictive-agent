@@ -32,6 +32,12 @@ TRAINING_CORPORA = {
     "code": 'const result = await lookup({"order_id":"ORD-0042","history":true}); ',
     "json": '{"customer":"CUST-021","items":[{"sku":"SKU-0007","quantity":2}]} ',
 }
+ROBUSTNESS_CORPORA = (
+    ("alphabetic-short", "abcdefghijklmnopqrstuvwxyz", 160),
+    ("alphabetic-long", "sphinxofblackquartzjudgemyvow", 1280),
+    ("alphanumeric", "agent2026order0042sku0007", 640),
+    ("repeated", "predictivepredictivepredictive", 960),
+)
 
 
 class Case(TypedDict):
@@ -49,6 +55,10 @@ def training_cases() -> list[Case]:
         for category, corpus in TRAINING_CORPORA.items()
         for length in TRAINING_LENGTHS
     ]
+    cases.extend(
+        _single_message_case(f"train-{name}", "robustness", corpus, length)
+        for name, corpus, length in ROBUSTNESS_CORPORA
+    )
     cases.extend(
         [
             {
@@ -369,6 +379,156 @@ def validation_cases() -> list[Case]:
     ]
 
 
+def runtime_final_cases() -> list[Case]:
+    """Return the frozen final cases for direct paired runtime validation."""
+    return [
+        {
+            **_single_message_case(
+                "runtime-final-english-medium",
+                "english",
+                "Give a concise evidence-based next step without inventing facts. ",
+                640,
+            ),
+            "output_tokens": 32,
+        },
+        {
+            **_single_message_case(
+                "runtime-final-turkish-short",
+                "turkish",
+                "Doğrulanmış durumu kısa ve açık biçimde açıkla. ",
+                320,
+            ),
+            "output_tokens": 16,
+        },
+        {
+            **_single_message_case(
+                "runtime-final-code-medium",
+                "code",
+                "def validate(record: dict[str, object]) -> bool:\n"
+                "    return bool(record.get('verified'))\n",
+                1100,
+            ),
+            "output_tokens": 32,
+        },
+        {
+            **_single_message_case(
+                "runtime-final-json-long",
+                "json",
+                '{"audit":{"verified":true},"records":[{"kind":"order","count":3}]} ',
+                1500,
+            ),
+            "output_tokens": 64,
+        },
+        {
+            "name": "runtime-final-conversation",
+            "category": "conversation",
+            "messages": [
+                {"role": "system", "content": "Use only verified information."},
+                {"role": "user", "content": "Summarize the request."},
+                {"role": "assistant", "content": "I will avoid unsupported details."},
+                {"role": "user", "content": "Give one concise next action."},
+            ],
+            "tools": [],
+            "output_tokens": 32,
+        },
+        _final_tool_case(
+            "runtime-final-tool-order",
+            "Show order ORD-0173.",
+            "get_order",
+            "order_id",
+        ),
+        _final_tool_case(
+            "runtime-final-tool-shipment",
+            "Track the shipment for order ORD-0184.",
+            "get_shipment",
+            "order_id",
+            extra_tools=[_lookup_tool("get_order", "order_id")],
+        ),
+        _final_tool_case(
+            "runtime-final-tool-customer",
+            "Retrieve customer CUST-073.",
+            "get_customer",
+            "customer_id",
+        ),
+        _final_tool_case(
+            "runtime-final-tool-policy",
+            "Explain the shipping policy.",
+            "get_policy",
+            "policy_name",
+        ),
+        _final_tool_case(
+            "runtime-final-tool-product",
+            "Check inventory for SKU-0162.",
+            "get_product",
+            "sku",
+            extra_tools=[_lookup_tool("get_customer", "customer_id")],
+        ),
+        {
+            "name": "runtime-final-after-tool-result",
+            "category": "tool-result-final",
+            "messages": [
+                {"role": "system", "content": "Answer only from the verified tool result."},
+                {"role": "user", "content": "What is the order status?"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_runtime_final",
+                            "type": "function",
+                            "function": {
+                                "name": "get_order",
+                                "arguments": {"order_id": "ORD-0137"},
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_runtime_final",
+                    "content": '{"order_id":"ORD-0137","status":"shipped"}',
+                },
+            ],
+            "tools": [_lookup_tool("get_order", "order_id")],
+            "output_tokens": 32,
+        },
+        {
+            "name": "runtime-final-multi-turn-product",
+            "category": "multi-turn-tool",
+            "messages": [
+                {"role": "system", "content": "Use the requested tool for current facts."},
+                {"role": "user", "content": "Show order ORD-0104."},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_history",
+                            "type": "function",
+                            "function": {
+                                "name": "get_order",
+                                "arguments": {"order_id": "ORD-0104"},
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_history",
+                    "content": '{"order_id":"ORD-0104","status":"paid"}',
+                },
+                {"role": "assistant", "content": "The order is paid."},
+                {"role": "user", "content": "Now check inventory for SKU-0012."},
+            ],
+            "tools": [
+                _lookup_tool("get_order", "order_id"),
+                _lookup_tool("get_product", "sku"),
+            ],
+            "output_tokens": 64,
+        },
+    ]
+
+
 def _final_tool_case(
     name: str,
     prompt: str,
@@ -415,7 +575,12 @@ def _mark_cases(cases: list[Case], run_id: str, repetitions: int = 1) -> list[Ca
             content = messages[0].get("content")
             if not isinstance(content, str):
                 raise ValueError("the first calibration message must contain text")
-            messages[0]["content"] = f"{run_id}-r{repetition}-{index:02d} {content}"
+            nonce = f"{run_id}-r{repetition}-{index:02d}"
+            messages[0]["content"] = (
+                f"{content}\nBenchmark nonce (not user data or a tool argument): {nonce}."
+                if messages[0].get("role") == "system"
+                else f"{nonce} {content}"
+            )
             marked.append(
                 {
                     **case,
@@ -645,6 +810,8 @@ def measure_stream(client: httpx.Client, model: str, case: Case) -> dict[str, An
         "name": case["name"],
         "case_name": case.get("base_name", case["name"]),
         "category": case["category"],
+        "input_messages": case["messages"],
+        "input_tools": case["tools"],
         "characters": len(text),
         "prompt_sha256": hashlib.sha256(text.encode()).hexdigest(),
         "message_count": len(case["messages"]),
@@ -658,6 +825,9 @@ def measure_stream(client: httpx.Client, model: str, case: Case) -> dict[str, An
         "generated_output_features": list(character_features(generated_text)),
         "generated_output_sha256": hashlib.sha256(generated_text.encode()).hexdigest(),
         "generated_output_characters": len(generated_text),
+        "generated_content": "".join(generated_content),
+        "generated_tool_calls": generated_tool_calls,
+        "canonical_generated_output": generated_text,
         "output_kind": "tool_call" if generated_tool_calls else "text",
         "output_token_budget": case.get("output_tokens", OUTPUT_TOKEN_BUDGET),
         "observed_response_headers_seconds": headers_at - started,
@@ -848,9 +1018,7 @@ def calibrate(
         base_pairs = [
             (case, sample)
             for case, sample in zip(train_cases, training, strict=True)
-            if case["category"] in TRAINING_CORPORA
-            and len(case["messages"]) == 1
-            and not case["tools"]
+            if len(case["messages"]) == 1 and not case["tools"]
         ]
         base_coefficients = fit_nonnegative_regression(
             [regression_features(case)[:6] for case, _ in base_pairs],
@@ -1060,7 +1228,7 @@ def calibrate(
         "fit": {
             "token_regression": {
                 "intercept": coefficients[0],
-                "letter_coefficient": coefficients[1],
+                "character_coefficient": coefficients[1],
                 "digit_coefficient": coefficients[2],
                 "whitespace_coefficient": coefficients[3],
                 "punctuation_coefficient": coefficients[4],
