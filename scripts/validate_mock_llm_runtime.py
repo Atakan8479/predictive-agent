@@ -18,13 +18,15 @@ from mocks.llm.calibration import serialize_completion
 from scripts.calibrate_mock_llm import (
     ACCEPTANCE_PERCENT,
     Case,
-    _mark_cases,
     fit_regression,
+    mark_cases,
     measure_stream,
     runtime_final_cases,
     summarize_errors,
     validation_cases,
 )
+
+from predictive_agent.config import Settings
 
 
 def measure_mock_stream(
@@ -236,6 +238,9 @@ def compare_pair(
         "output_token_difference": int(mock["completion_tokens"])
         - int(ollama["actual_output_tokens"]),
         "output_token_error_percent": output_token_error,
+        "prompt_token_error_percent": _percent_error(
+            float(mock["prompt_tokens"]), float(ollama["actual_prompt_tokens"])
+        ),
         "first_meaningful_absolute_error_seconds": abs(mock_first - ollama_first),
         "first_meaningful_error_percent": _percent_error(mock_first, ollama_first),
         "tool_ready_absolute_error_seconds": (
@@ -284,6 +289,9 @@ def aggregate(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "equivalence": sorted(
                     {str(sample["output_equivalence"]) for sample in repetitions}
                 ),
+                "prompt_token_error_percent": median(
+                    float(sample["prompt_token_error_percent"]) for sample in repetitions
+                ),
                 "first_meaningful_error_percent": median(first_errors),
                 "tool_ready_error_percent": median(tool_errors) if tool_errors else None,
                 "total_error_percent": median(total_errors) if total_errors else None,
@@ -326,7 +334,7 @@ def validate(
 ) -> dict[str, Any]:
     run_id = hashlib.sha256(str(time_ns()).encode()).hexdigest()[:16]
     base_cases = runtime_final_cases() if final else validation_cases()
-    cases = _mark_cases(base_cases, f"{run_id}-paired", repetitions)
+    cases = mark_cases(base_cases, f"{run_id}-paired", repetitions)
     timeout = httpx.Timeout(120.0, connect=5.0, read=120.0, write=10.0, pool=5.0)
     samples: list[dict[str, Any]] = []
     fast_headers = {
@@ -383,6 +391,7 @@ def validate(
         for sample in samples
         if sample["total_duration_comparable"]
     ]
+    settings = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
     return {
         "metadata": {
             "generated_at": datetime.now(UTC).isoformat(),
@@ -398,6 +407,11 @@ def validate(
             "python_version": platform.python_version(),
             "httpx_version": httpx.__version__,
             "platform": platform.platform(),
+            "mock_timing_configuration": {
+                "base_latency_ms": settings.mock_llm_base_latency_ms,
+                "prefill_tps": settings.mock_llm_prefill_tps,
+                "decode_tps": settings.mock_llm_decode_tps,
+            },
         },
         "method": {
             "first_meaningful": (
@@ -406,13 +420,17 @@ def validate(
             "tool_ready": "direct request-start to complete parseable schema-valid tool arguments",
             "equivalence_policy": (
                 "Tool timing is comparable only for one identical schema-valid action. Total "
-                "timing is comparable only for canonical output or executable-action equivalence."
+                "timing additionally requires canonical output and completion-token lengths "
+                "within the acceptance threshold."
             ),
             "cache_control": "Ollama cache_prompt=false with unique run/repetition prefixes",
             "warmup_excluded": True,
         },
         "warmup": warmup,
         "summary": {
+            "prompt_tokens": summarize_errors(
+                float(case["prompt_token_error_percent"]) for case in case_results
+            ),
             "first_meaningful": _summary(
                 float(case["first_meaningful_error_percent"]) for case in case_results
             ),
@@ -424,6 +442,9 @@ def validate(
             ),
         },
         "measurement_summary": {
+            "prompt_tokens": summarize_errors(
+                float(sample["prompt_token_error_percent"]) for sample in samples
+            ),
             "first_meaningful": _summary(
                 float(sample["first_meaningful_error_percent"]) for sample in samples
             ),

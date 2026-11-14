@@ -565,7 +565,7 @@ def _marker(name: str) -> str:
     return hashlib.sha256(name.encode()).hexdigest()[:16]
 
 
-def _mark_cases(cases: list[Case], run_id: str, repetitions: int = 1) -> list[Case]:
+def mark_cases(cases: list[Case], run_id: str, repetitions: int = 1) -> list[Case]:
     if repetitions < 1:
         raise ValueError("repetitions must be at least one")
     marked: list[Case] = []
@@ -1000,9 +1000,9 @@ def calibrate(
     base_url: str, model: str, repetitions: int = 2, *, use_development_cases: bool = False
 ) -> dict[str, Any]:
     run_id = hashlib.sha256(str(time_ns()).encode()).hexdigest()[:16]
-    train_cases = _mark_cases(training_cases(), f"{run_id}-train", repetitions)
+    train_cases = mark_cases(training_cases(), f"{run_id}-train", repetitions)
     selected_validation_cases = development_cases() if use_development_cases else validation_cases()
-    heldout_cases = _mark_cases(selected_validation_cases, f"{run_id}-final", repetitions)
+    heldout_cases = mark_cases(selected_validation_cases, f"{run_id}-final", repetitions)
     timeout = httpx.Timeout(120.0, connect=5.0, read=120.0, write=10.0, pool=5.0)
     with httpx.Client(base_url=base_url, timeout=timeout) as client:
         version = _object(client.get("/api/version")).get("version", "unknown")
@@ -1294,10 +1294,16 @@ def main() -> None:
     parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
     parser.add_argument("--model", default="qwen3.5:9b-q4_K_M")
     parser.add_argument("--repetitions", type=int, default=2)
+    parser.add_argument("--development", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
-        result = calibrate(args.ollama_url, args.model, args.repetitions)
+        result = calibrate(
+            args.ollama_url,
+            args.model,
+            args.repetitions,
+            use_development_cases=args.development,
+        )
     except (httpx.HTTPError, OSError, ValueError) as error:
         raise SystemExit(f"calibration failed: {error}") from error
     if args.output is not None:

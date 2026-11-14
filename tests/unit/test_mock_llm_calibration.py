@@ -8,6 +8,7 @@ from mocks.llm.calibration import estimate_prompt_tokens_for_payload, prompt_fea
 from scripts.calibrate_mock_llm import (
     estimator_text,
     fit_regression,
+    mark_cases,
     measure_stream,
     runtime_final_cases,
     summarize_errors,
@@ -53,6 +54,18 @@ def test_runtime_final_cases_are_new_and_cover_paired_acceptance_scope() -> None
         "multi-turn-tool",
     }
     assert sum(case["category"] == "tool-call" for case in final) == 5
+
+
+def test_cache_nonce_cannot_be_confused_with_tool_argument() -> None:
+    policy = next(
+        case for case in runtime_final_cases() if case["name"] == "runtime-final-tool-policy"
+    )
+
+    marked = mark_cases([policy], "unique-run", 1)[0]
+
+    assert marked["messages"][0]["content"].startswith("Call the requested tool")
+    assert "not user data or a tool argument" in marked["messages"][0]["content"]
+    assert marked["messages"][1]["content"] == "Explain the shipping policy."
 
 
 @pytest.mark.parametrize(
@@ -181,6 +194,7 @@ def test_paired_runtime_requires_complete_schema_valid_equivalent_action() -> No
         "observed_tool_ready_seconds": 0.6,
         "observed_total_seconds": 0.62,
         "actual_output_tokens": 27,
+        "actual_prompt_tokens": 300,
     }
     mock = {
         "generated_tool_calls": mock_calls,
@@ -189,6 +203,7 @@ def test_paired_runtime_requires_complete_schema_valid_equivalent_action() -> No
         "observed_tool_ready_seconds": 0.58,
         "observed_total_seconds": 0.59,
         "completion_tokens": 26,
+        "prompt_tokens": 298,
     }
 
     assert tool_calls_are_executable(ollama_calls, case["tools"])

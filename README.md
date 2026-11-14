@@ -82,8 +82,10 @@ command and bounded concurrency controls. Its read timeout is intentionally long
 
 The mock LLM supports regular and SSE `POST /v1/chat/completions` responses, deterministic
 schema-valid calls for `get_order`, `get_shipment`, `get_customer`, `get_policy`, and `get_product`,
-and conversation-aware final answers after matched tool results. Missing or ambiguous identifiers,
-unsupported tools, and unsatisfied explicit tool choices fail deterministically. `max_tokens` and
+and conversation-aware final answers after matched tool results. Automatic calls require matching
+current-turn intent as well as safe arguments; incidental identifiers cannot select unrelated tools.
+Missing or ambiguous identifiers, unsupported tools, and unsatisfied explicit choices fail
+deterministically. `max_tokens` and
 `max_completion_tokens` limit text with a `length` finish reason; a budget too small for complete
 tool-call JSON returns HTTP 400. Unknown request fields, conflicting token limits, malformed tool
 history, and unsupported schemas are rejected explicitly.
@@ -91,8 +93,10 @@ history, and unsupported schemas are rejected explicitly.
 Buffered tool-call JSON becomes executable only after simulated decode time. Configure defaults
 with `PA_MOCK_LLM_BASE_LATENCY_MS`, `PA_MOCK_LLM_PREFILL_TPS`, and
 `PA_MOCK_LLM_DECODE_TPS`; request headers with the corresponding `X-Mock-LLM-*` names take
-precedence. The exact supported schema subset, independent ±15% validation, raw evidence, and
-limitations are in [the calibration report](docs/benchmarks/mock-llm-calibration.md).
+precedence. Direct paired Ollama–Docker-mock validation measures actual SSE arrival rather than
+equation-only predictions. The supported schema subset, workload-equivalence rules, independent
+±15% results, raw evidence, and limitations are in
+[the calibration report](docs/benchmarks/mock-llm-calibration.md).
 
 ## Environment check and LLM baseline
 
