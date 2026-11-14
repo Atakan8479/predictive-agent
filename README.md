@@ -43,9 +43,10 @@ The default host endpoints are:
 | Jaeger OTLP | `localhost:4317` (gRPC), `http://localhost:4318` (HTTP) | Trace ingestion |
 | Jaeger UI | `http://localhost:16686` | Trace inspection |
 | Mock APIs | `http://localhost:8080` | Deterministic OMS, shipping, CRM, policy, and inventory data |
+| Mock LLM | `http://localhost:8090/v1` | Calibrated OpenAI-compatible Chat Completions |
 
 Host binding and ports can be changed through the `PA_INFRA_*`, `PA_VALKEY_PORT`, `PA_NATS_*`,
-`PA_TOXIPROXY_*`, `PA_JAEGER_*`, and `PA_MOCK_APIS_PORT` values in `.env`. Valkey and NATS data use
+`PA_TOXIPROXY_*`, `PA_JAEGER_*`, and `PA_MOCK_*` values in `.env`. Valkey and NATS data use
 named volumes and survive `make down`. Use `make logs` to follow service logs and `make down` to
 stop the stack.
 
@@ -78,6 +79,20 @@ For reproducible failure diagnostics, the opt-in integration experiment compares
 profile isolation, and structured JSON output. See `deploy/toxiproxy/profiles/README.md` for the
 command and bounded concurrency controls. Its read timeout is intentionally longer than the
 10-second timeout toxic; configured toxicity is never interpreted as a guaranteed request rate.
+
+The mock LLM supports regular and SSE `POST /v1/chat/completions` responses, deterministic
+schema-valid calls for `get_order`, `get_shipment`, `get_customer`, `get_policy`, and `get_product`,
+and conversation-aware final answers after matched tool results. Missing or ambiguous identifiers,
+unsupported tools, and unsatisfied explicit tool choices fail deterministically. `max_tokens` and
+`max_completion_tokens` limit text with a `length` finish reason; a budget too small for complete
+tool-call JSON returns HTTP 400. Unknown request fields, conflicting token limits, malformed tool
+history, and unsupported schemas are rejected explicitly.
+
+Buffered tool-call JSON becomes executable only after simulated decode time. Configure defaults
+with `PA_MOCK_LLM_BASE_LATENCY_MS`, `PA_MOCK_LLM_PREFILL_TPS`, and
+`PA_MOCK_LLM_DECODE_TPS`; request headers with the corresponding `X-Mock-LLM-*` names take
+precedence. The exact supported schema subset, independent ±15% validation, raw evidence, and
+limitations are in [the calibration report](docs/benchmarks/mock-llm-calibration.md).
 
 ## Environment check and LLM baseline
 
