@@ -8,6 +8,10 @@ services:
       dockerfile: mocks/llm/Dockerfile
     ports:
       - "${PA_INFRA_BIND_ADDRESS:-127.0.0.1}:${PA_MOCK_LLM_PORT:-8090}:8200"
+    environment:
+      PA_MOCK_LLM_BASE_LATENCY_MS: "${PA_MOCK_LLM_BASE_LATENCY_MS:-75.460}"
+      PA_MOCK_LLM_PREFILL_TPS: "${PA_MOCK_LLM_PREFILL_TPS:-3503.696}"
+      PA_MOCK_LLM_DECODE_TPS: "${PA_MOCK_LLM_DECODE_TPS:-68.048}"
     healthcheck:
       test:
         [

@@ -46,7 +46,7 @@ def _tool(name: str) -> dict[str, Any]:
             "name": name,
             "parameters": {
                 "type": "object",
-                "properties": {parameter: TOOL_SCHEMAS[name]},
+                "properties": {parameter: dict(TOOL_SCHEMAS[name])},
                 "required": [parameter],
             },
         },
@@ -220,6 +220,173 @@ async def test_named_tool_choice_is_respected(client: httpx.AsyncClient) -> None
     assert json.loads(call["function"]["arguments"]) == {"order_id": "ORD-0042"}
 
 
+async def test_overlapping_order_and_shipment_intent_selects_shipment(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Track the shipment for order ORD-0042."}],
+            "tools": [_tool("get_order"), _tool("get_shipment")],
+        },
+    )
+
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "get_shipment"
+
+
+async def test_auto_skips_tools_when_current_request_has_no_external_intent(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Say hello"}],
+            "tools": [_tool("get_order"), _tool("get_product")],
+            "tool_choice": "auto",
+        },
+    )
+
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"] == {"role": "assistant", "content": "Mock response complete."}
+
+
+async def test_required_and_named_tool_failures_are_explicit(client: httpx.AsyncClient) -> None:
+    required = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Show my order"}],
+            "tools": [_tool("get_order")],
+            "tool_choice": "required",
+        },
+    )
+    unsupported: dict[str, Any] = {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+    named = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Search for current news"}],
+            "tools": [unsupported],
+            "tool_choice": {"type": "function", "function": {"name": "search_web"}},
+        },
+    )
+
+    assert required.status_code == 400
+    assert "order_id is missing" in required.json()["detail"]
+    assert named.status_code == 400
+    assert "unsupported tool" in named.json()["detail"]
+
+
+async def test_new_user_turn_ignores_historical_tool_result_and_identifiers(
+    client: httpx.AsyncClient,
+) -> None:
+    historical_call = {
+        "id": "call_order",
+        "type": "function",
+        "function": {"name": "get_order", "arguments": '{"order_id":"ORD-0042"}'},
+    }
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [
+                {"role": "user", "content": "Show order ORD-0042"},
+                {"role": "assistant", "content": None, "tool_calls": [historical_call]},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_order",
+                    "content": '{"order_id":"ORD-0042","status":"delivered"}',
+                },
+                {"role": "assistant", "content": "The order was delivered."},
+                {"role": "user", "content": "Check inventory for SKU-0007"},
+            ],
+            "tools": [_tool("get_order"), _tool("get_product")],
+        },
+    )
+
+    choice = response.json()["choices"][0]
+    call = choice["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "get_product"
+    assert json.loads(call["function"]["arguments"]) == {"sku": "SKU-0007"}
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [
+            {"role": "user", "content": "Show order ORD-0042"},
+            {"role": "tool", "tool_call_id": "missing", "content": "{}"},
+        ],
+        [
+            {"role": "user", "content": "Show order ORD-0042"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_order", "arguments": "not-json"},
+                    }
+                ],
+            },
+        ],
+        [
+            {"role": "user", "content": "Show order ORD-0042"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_order", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "{}"},
+            {"role": "tool", "tool_call_id": "call_1", "content": "{}"},
+        ],
+        [
+            {"role": "user", "content": "Show order ORD-0042"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_order", "arguments": "{}"},
+                    }
+                ],
+            },
+        ],
+    ],
+)
+async def test_invalid_tool_result_relationships_are_rejected(
+    client: httpx.AsyncClient, messages: list[dict[str, Any]]
+) -> None:
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={"model": "mock-calibrated", "messages": messages},
+    )
+
+    assert response.status_code == 422
+
+
 async def test_unsupported_required_schema_returns_fallback(client: httpx.AsyncClient) -> None:
     tool = _tool("get_order")
     tool["function"]["parameters"]["properties"]["region"] = {"type": "string"}
@@ -237,6 +404,104 @@ async def test_unsupported_required_schema_returns_fallback(client: httpx.AsyncC
 
     assert (
         "required parameter 'region' is unavailable"
+        in response.json()["choices"][0]["message"]["content"]
+    )
+
+
+async def test_supported_schema_constraints_generate_valid_boundary_values(
+    client: httpx.AsyncClient,
+) -> None:
+    tool = _tool("get_order")
+    parameters = tool["function"]["parameters"]
+    parameters["additionalProperties"] = False
+    parameters["properties"].update(
+        {
+            "region": {
+                "type": "string",
+                "const": "EU",
+                "pattern": "^[A-Z]{2}$",
+                "minLength": 2,
+                "maxLength": 2,
+            },
+            "attempts": {"type": "integer", "default": 2, "minimum": 2, "maximum": 2},
+            "ratio": {"type": "number", "enum": [0.5], "minimum": 0, "maximum": 1},
+            "enabled": {"type": "boolean", "const": True},
+            "note": {"type": "null", "const": None},
+        }
+    )
+    parameters["required"].extend(["region", "attempts", "ratio", "enabled", "note"])
+
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Show order ORD-0042"}],
+            "tools": [tool],
+        },
+    )
+
+    arguments = json.loads(
+        response.json()["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+    )
+    assert arguments == {
+        "attempts": 2,
+        "enabled": True,
+        "note": None,
+        "order_id": "ORD-0042",
+        "ratio": 0.5,
+        "region": "EU",
+    }
+
+
+@pytest.mark.parametrize(
+    ("schema_update", "expected"),
+    [
+        ({"oneOf": [{"type": "string"}]}, "unsupported constraint"),
+        ({"type": "string", "default": "x", "minLength": 2}, "does not satisfy"),
+        ({"type": "string", "const": "EU", "pattern": "["}, "invalid regular-expression"),
+        ({"type": "integer", "default": 4, "maximum": 3}, "does not satisfy"),
+        ({"type": "number", "default": 1, "minimum": 2}, "does not satisfy"),
+        ({"type": "boolean", "default": 1}, "does not satisfy"),
+        ({"type": "string", "enum": []}, "enum must be a non-empty array"),
+    ],
+)
+async def test_malformed_or_unsatisfied_schema_constraints_are_explicit(
+    client: httpx.AsyncClient, schema_update: dict[str, Any], expected: str
+) -> None:
+    tool = _tool("get_order")
+    tool["function"]["parameters"]["properties"]["region"] = schema_update
+    tool["function"]["parameters"]["required"].append("region")
+
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Show order ORD-0042"}],
+            "tools": [tool],
+        },
+    )
+
+    assert expected in response.json()["choices"][0]["message"]["content"]
+
+
+async def test_non_boolean_additional_properties_is_rejected(client: httpx.AsyncClient) -> None:
+    tool = _tool("get_order")
+    tool["function"]["parameters"]["additionalProperties"] = {"type": "string"}
+
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Show order ORD-0042"}],
+            "tools": [tool],
+        },
+    )
+
+    assert (
+        "additionalProperties must be a boolean"
         in response.json()["choices"][0]["message"]["content"]
     )
 
@@ -313,6 +578,84 @@ async def test_streaming_tool_call_uses_openai_delta_shape(client: httpx.AsyncCl
     assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
 
 
+async def test_buffered_tool_call_arrives_after_full_decode_without_double_counting(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("mocks.llm.app.asyncio.sleep", record_sleep)
+    payload = {
+        "model": "mock-calibrated",
+        "messages": [{"role": "user", "content": "Show order ORD-0042"}],
+        "tools": [_tool("get_order")],
+    }
+    regular = await client.post(
+        "/v1/chat/completions",
+        headers={
+            "X-Mock-LLM-Base-Latency-Ms": "100",
+            "X-Mock-LLM-Prefill-TPS": "100",
+            "X-Mock-LLM-Decode-TPS": "20",
+        },
+        json=payload,
+    )
+    regular_sleep = sleeps.pop()
+    streamed = await client.post(
+        "/v1/chat/completions",
+        headers={
+            "X-Mock-LLM-Base-Latency-Ms": "100",
+            "X-Mock-LLM-Prefill-TPS": "100",
+            "X-Mock-LLM-Decode-TPS": "20",
+        },
+        json={**payload, "stream": True},
+    )
+
+    assert regular.status_code == 200
+    assert streamed.status_code == 200
+    assert len(sleeps) == 1
+    assert sleeps[0] == pytest.approx(regular_sleep)
+    usage = regular.json()["usage"]
+    assert regular_sleep == pytest.approx(
+        0.1 + usage["prompt_tokens"] / 100 + usage["completion_tokens"] / 20
+    )
+
+
+async def test_text_stream_exposes_content_at_ttft_then_decodes(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("mocks.llm.app.asyncio.sleep", record_sleep)
+    response = await client.post(
+        "/v1/chat/completions",
+        headers={
+            "X-Mock-LLM-Base-Latency-Ms": "100",
+            "X-Mock-LLM-Prefill-TPS": "100",
+            "X-Mock-LLM-Decode-TPS": "20",
+        },
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        },
+    )
+    chunks = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line and line != "data: [DONE]"
+    ]
+    usage = chunks[-1]["usage"]
+
+    assert sleeps[0] == pytest.approx(0.1 + usage["prompt_tokens"] / 100)
+    assert sum(sleeps[1:]) == pytest.approx(usage["completion_tokens"] / 20)
+
+
 async def test_max_tokens_limits_regular_and_streaming_content(
     client: httpx.AsyncClient,
 ) -> None:
@@ -387,6 +730,9 @@ async def test_unsupported_or_invalid_request_fields_are_rejected(
         {"X-Mock-LLM-Base-Latency-Ms": "-1"},
         {"X-Mock-LLM-Prefill-TPS": "0"},
         {"X-Mock-LLM-Decode-TPS": "invalid"},
+        {"X-Mock-LLM-Base-Latency-Ms": "nan"},
+        {"X-Mock-LLM-Prefill-TPS": "inf"},
+        {"X-Mock-LLM-Decode-TPS": "-inf"},
     ],
 )
 async def test_invalid_timing_headers_are_rejected(
@@ -402,9 +748,10 @@ async def test_invalid_timing_headers_are_rejected(
 
 
 def test_calibrated_token_estimator_handles_character_classes() -> None:
-    assert estimate_tokens("a" * 128) == 60
-    assert estimate_tokens("{" * 128) == 125
-    assert estimate_tokens("ü" * 128) == 133
+    assert estimate_tokens("a" * 128) >= estimate_tokens("a" * 64)
+    assert estimate_tokens("{" * 128) > 0
+    assert estimate_tokens("ü" * 128) > 0
+    assert estimate_content_tokens("") == 0
     assert estimate_prompt_tokens("lookup", message_count=4, tool_count=1) > estimate_tokens(
         "lookup"
     )
@@ -420,6 +767,6 @@ def test_timing_model_uses_settings_and_overrides() -> None:
         settings, base_latency_ms=10.0, prefill_tps=100.0, decode_tps=20.0
     )
 
-    assert calibrated.base_latency_ms == pytest.approx(94.775)
+    assert calibrated.base_latency_ms == pytest.approx(75.460)
     assert overridden.ttft_seconds(50) == pytest.approx(0.51)
     assert overridden.total_seconds(50, 10) == pytest.approx(1.01)

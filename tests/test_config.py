@@ -9,19 +9,25 @@ def test_defaults_target_local_ollama_with_prefetch_off() -> None:
     s = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
     assert s.llm_base_url == "http://localhost:11434/v1"
     assert s.llm_think is False
-    assert s.mock_llm_base_latency_ms == pytest.approx(94.775)
-    assert s.mock_llm_prefill_tps == pytest.approx(3146.301)
-    assert s.mock_llm_decode_tps == pytest.approx(65.790)
+    assert s.mock_llm_base_latency_ms == pytest.approx(75.460)
+    assert s.mock_llm_prefill_tps == pytest.approx(3503.696)
+    assert s.mock_llm_decode_tps == pytest.approx(68.048)
     assert s.prefetch_enabled is False
 
 
 def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PA_LLM_MODEL", "mock-llm")
     monkeypatch.setenv("PA_PREFETCH_ENABLED", "true")
+    monkeypatch.setenv("PA_MOCK_LLM_BASE_LATENCY_MS", "12.5")
+    monkeypatch.setenv("PA_MOCK_LLM_PREFILL_TPS", "250")
+    monkeypatch.setenv("PA_MOCK_LLM_DECODE_TPS", "40")
     # Pydantic Settings accepts _env_file at runtime, but its generated signature omits it.
     s = Settings(_env_file=None)  # pyright: ignore[reportCallIssue]
     assert s.llm_model == "mock-llm"
     assert s.prefetch_enabled is True
+    assert s.mock_llm_base_latency_ms == pytest.approx(12.5)
+    assert s.mock_llm_prefill_tps == pytest.approx(250)
+    assert s.mock_llm_decode_tps == pytest.approx(40)
 
 
 @pytest.mark.parametrize(
@@ -30,6 +36,9 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
         ("PA_MOCK_LLM_BASE_LATENCY_MS", "-1"),
         ("PA_MOCK_LLM_PREFILL_TPS", "0"),
         ("PA_MOCK_LLM_DECODE_TPS", "invalid"),
+        ("PA_MOCK_LLM_BASE_LATENCY_MS", "nan"),
+        ("PA_MOCK_LLM_PREFILL_TPS", "inf"),
+        ("PA_MOCK_LLM_DECODE_TPS", "-inf"),
     ],
 )
 def test_invalid_mock_llm_timing_is_rejected(
