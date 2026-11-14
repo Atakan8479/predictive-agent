@@ -3,6 +3,8 @@ from typing import Any
 
 import httpx
 import pytest
+from mocks.llm.app import ChatCompletionRequest, prompt_tokens_for_request
+from mocks.llm.calibration import estimate_prompt_tokens_for_payload
 from scripts.calibrate_mock_llm import (
     estimator_text,
     fit_regression,
@@ -17,7 +19,7 @@ def test_training_and_heldout_cases_are_distinct_and_cover_agent_workloads() -> 
     training = training_cases()
     heldout = validation_cases()
 
-    assert len(training) == 29
+    assert len(training) == 35
     assert len(heldout) == 10
     assert {case["name"] for case in training}.isdisjoint(case["name"] for case in heldout)
     assert {case["category"] for case in heldout} == {
@@ -25,10 +27,24 @@ def test_training_and_heldout_cases_are_distinct_and_cover_agent_workloads() -> 
         "turkish",
         "code",
         "json",
-        "tools-and-history",
+        "tool-call",
+        "tool-result-final",
     }
     assert any(case["tools"] and len(case["messages"]) > 1 for case in heldout)
-    assert len({estimator_text(case)[:16] for case in training + heldout}) == 39
+    assert len({estimator_text(case) for case in training + heldout}) == 45
+
+
+def test_runtime_and_calibration_prompt_features_are_identical() -> None:
+    case = validation_cases()[-1]
+    runtime_messages = json.loads(json.dumps(case["messages"]))
+    arguments = runtime_messages[2]["tool_calls"][0]["function"]["arguments"]
+    runtime_messages[2]["tool_calls"][0]["function"]["arguments"] = json.dumps(arguments)
+    request = ChatCompletionRequest.model_validate(
+        {"model": "mock-calibrated", "messages": runtime_messages, "tools": case["tools"]}
+    )
+    expected = estimate_prompt_tokens_for_payload(case["messages"], case["tools"])
+
+    assert prompt_tokens_for_request(request) == expected
 
 
 def test_regression_rejects_empty_and_singular_inputs() -> None:
@@ -77,6 +93,10 @@ def test_stream_measurement_uses_first_meaningful_content_and_final_metrics() ->
     assert sample["actual_prompt_tokens"] == 12
     assert sample["actual_output_tokens"] == 2
     assert sample["cached_prompt_tokens"] == 0
-    assert sample["observed_first_event_bytes_seconds"] <= sample["observed_ttft_seconds"]
-    assert sample["observed_ttft_seconds"] <= sample["observed_final_event_seconds"]
+    assert sample["output_kind"] == "text"
+    assert sample["runtime_estimated_output_tokens"] > 0
+    assert (
+        sample["observed_first_event_bytes_seconds"] <= sample["observed_first_meaningful_seconds"]
+    )
+    assert sample["observed_first_meaningful_seconds"] <= sample["observed_final_event_seconds"]
     assert sample["measured_decode_tps"] == pytest.approx(500.0)

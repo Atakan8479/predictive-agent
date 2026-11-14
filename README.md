@@ -82,14 +82,17 @@ command and bounded concurrency controls. Its read timeout is intentionally long
 
 The mock LLM supports regular and SSE `POST /v1/chat/completions` responses, deterministic
 schema-valid calls for `get_order`, `get_shipment`, `get_customer`, `get_policy`, and `get_product`,
-and final answers after tool results. Missing, ambiguous, or unsupported arguments produce an
-explicit deterministic text fallback. `max_tokens` and `max_completion_tokens` limit text with a
-`length` finish reason; a budget too small for complete tool-call JSON returns HTTP 400. Unknown
-request fields and conflicting token-limit fields return HTTP 422. Its held-out streaming
-calibration, including the documented Ollama tool-call TTFT limitation, is in
-`docs/benchmarks/mock-llm-calibration.md`.
-Override timing per request with `X-Mock-LLM-Base-Latency-Ms`,
-`X-Mock-LLM-Prefill-TPS`, and `X-Mock-LLM-Decode-TPS`.
+and conversation-aware final answers after matched tool results. Missing or ambiguous identifiers,
+unsupported tools, and unsatisfied explicit tool choices fail deterministically. `max_tokens` and
+`max_completion_tokens` limit text with a `length` finish reason; a budget too small for complete
+tool-call JSON returns HTTP 400. Unknown request fields, conflicting token limits, malformed tool
+history, and unsupported schemas are rejected explicitly.
+
+Buffered tool-call JSON becomes executable only after simulated decode time. Configure defaults
+with `PA_MOCK_LLM_BASE_LATENCY_MS`, `PA_MOCK_LLM_PREFILL_TPS`, and
+`PA_MOCK_LLM_DECODE_TPS`; request headers with the corresponding `X-Mock-LLM-*` names take
+precedence. The exact supported schema subset, independent ±15% validation, raw evidence, and
+limitations are in [the calibration report](docs/benchmarks/mock-llm-calibration.md).
 
 ## Environment check and LLM baseline
 
