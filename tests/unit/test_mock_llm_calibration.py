@@ -65,11 +65,11 @@ def test_supplementary_text_duration_cases_are_controlled_and_distinct() -> None
 
     assert len(cases) == 5
     assert prior_names.isdisjoint(case["name"] for case in cases)
-    assert all(case["expected_content"] for case in cases)
-    assert len({case["output_tokens"] for case in cases}) == 3
+    assert all(case.get("expected_content") for case in cases)
+    assert len({case.get("output_tokens") for case in cases}) == 3
     assert sum(case["category"].startswith("controlled-post-tool") for case in cases) == 3
-    assert any("Sipariş" in case["expected_content"] for case in cases)
-    assert any('"customer_id"' in case["expected_content"] for case in cases)
+    assert any("Sipariş" in case.get("expected_content", "") for case in cases)
+    assert any('"customer_id"' in case.get("expected_content", "") for case in cases)
 
 
 def test_cache_nonce_cannot_be_confused_with_tool_argument() -> None:
@@ -203,7 +203,7 @@ def test_paired_runtime_requires_complete_schema_valid_equivalent_action() -> No
         '[{"function":{"arguments":{"policy_name":"returns"},'
         '"name":"get_policy"},"type":"function"}]'
     )
-    ollama = {
+    ollama: dict[str, Any] = {
         "generated_tool_calls": ollama_calls,
         "canonical_generated_output": canonical,
         "observed_first_meaningful_seconds": 0.6,
@@ -212,7 +212,7 @@ def test_paired_runtime_requires_complete_schema_valid_equivalent_action() -> No
         "actual_output_tokens": 27,
         "actual_prompt_tokens": 300,
     }
-    mock = {
+    mock: dict[str, Any] = {
         "generated_tool_calls": mock_calls,
         "canonical_generated_output": canonical,
         "observed_first_meaningful_seconds": 0.58,
@@ -234,3 +234,34 @@ def test_paired_runtime_rejects_incomplete_tool_arguments() -> None:
     calls = [{"function": {"name": "get_policy", "arguments": "{"}}]
 
     assert not tool_calls_are_executable(calls, case["tools"])
+
+
+def test_controlled_text_requires_the_declared_expected_output() -> None:
+    case = supplementary_text_duration_cases()[0]
+    ollama: dict[str, Any] = {
+        "generated_content": "Same but undeclared.",
+        "generated_tool_calls": [],
+        "canonical_generated_output": "Same but undeclared.",
+        "observed_first_meaningful_seconds": 0.2,
+        "observed_tool_ready_seconds": None,
+        "observed_total_seconds": 0.3,
+        "actual_output_tokens": 5,
+        "actual_prompt_tokens": 20,
+    }
+    mock: dict[str, Any] = {
+        "generated_content": "Same but undeclared.",
+        "generated_tool_calls": [],
+        "canonical_generated_output": "Same but undeclared.",
+        "observed_first_meaningful_seconds": 0.2,
+        "observed_tool_ready_seconds": None,
+        "observed_total_seconds": 0.3,
+        "completion_tokens": 5,
+        "prompt_tokens": 20,
+    }
+
+    result = compare_pair(case, ollama, mock)
+
+    assert result["canonical_output_equivalent"] is True
+    assert result["controlled_expected_match"] is False
+    assert result["semantic_equivalence"] == "controlled_expected_text_mismatch"
+    assert result["total_duration_comparable"] is False

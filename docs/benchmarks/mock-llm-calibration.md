@@ -5,6 +5,11 @@ The current M1.5 acceptance evidence is the direct paired run
 It compares Ollama 0.40.16 running `qwen3.5:9b-q4_K_M` with the actual Docker mock
 service built from commit `3061623c202a7becdb1e83065260685c286910c5`.
 
+The supplementary controlled-text run
+[`mock-llm-text-duration-2026-11-16.json`](mock-llm-text-duration-2026-11-16.json)
+preserves the remaining text total-duration investigation. It did not establish a comparable
+text total-duration sample, so that M1.5 acceptance criterion remains unresolved.
+
 The earlier
 [`mock-llm-calibration-2026-11-14.json`](mock-llm-calibration-2026-11-14.json) is
 preserved unchanged as historical evidence. Its cases have since been inspected and are
@@ -105,6 +110,39 @@ All individual measurements also passed: 24/24 first meaningful, 12/12 tool read
 | `get_product` | 0.654 / 0.726 s | 10.88% | 31 / 31 | 8.41% |
 | Multi-turn `get_product` | 0.688 / 0.766 s | 11.25% | 31 / 31 | 8.76% |
 
+## Supplementary controlled-text result
+
+Run `ef48dcafd77dd275` used the frozen timing configuration and source commit
+`ed990367ef973c7974e6cb23802ce9ba7b81476a`. Five cases with three repetitions covered short
+and long English prompts, three completion-length bands, Turkish text, structured JSON, and
+representative post-tool responses. Warm-up was recorded and excluded, every request used a
+unique nonce with `cache_prompt=false`, and every cached-token count was zero.
+
+Before execution, a controlled text sample was defined as semantically comparable only if both
+providers reproduced the declared expected text exactly. Total duration additionally required
+completion-token counts within ±15%. The validator did not refit or change the frozen timing
+parameters.
+
+| Case | Exact expected output | Token error | Raw total-error median | Acceptance |
+|---|---:|---:|---:|---|
+| English short | 1/3 | 20–40% | 25.40% | Non-comparable |
+| English long | 3/3 | 20% | 33.51% | Non-comparable |
+| Post-tool short JSON | 0/3 | 0% | 5.70% | Non-comparable |
+| Post-tool Turkish | 0/3 | 0% | 3.96% | Non-comparable |
+| Post-tool structured JSON | 0/3 | 3.33% | 9.34% | Non-comparable |
+
+Ollama sometimes retained the `<answer>` tags and, for post-tool cases, omitted the mock's
+`Mock final answer:` prefix. The English cases reproduced the expected content in four
+measurements, but their Ollama/mock completion counts were 5/6 tokens, a 20% difference above
+the threshold. Consequently, comparable text totals were 0/5 cases and 0/15 measurements;
+median, p95, and maximum comparable errors are not defined. Across all 15 raw but
+non-comparable totals, the diagnostic median was 6.71%, p95 was 37.76%, maximum was 37.76%, and
+10/15 happened to fall within ±15%. These diagnostic values are not acceptance evidence.
+
+The experiment was retained without changing prompts, timing constants, or acceptance rules.
+Controlled text total-duration accuracy therefore remains explicitly unresolved, and M1.5 is
+not fully closed by the available evidence.
+
 ## Reproduction
 
 Training/development calibration writes a new non-overwritable artifact:
@@ -124,6 +162,16 @@ uv run python -m scripts.validate_mock_llm_runtime \
 
 `--final` selects the frozen final dataset. A final artifact must use a new path and should
 not be used to tune the implementation that produced it.
+
+The frozen supplementary controlled-text dataset is selected separately:
+
+```bash
+uv run python -m scripts.validate_mock_llm_runtime \
+  --text-duration --repetitions 3 \
+  --output docs/benchmarks/mock-llm-text-duration-YYYY-MM-DD.json
+```
+
+`--final` and `--text-duration` are mutually exclusive.
 
 ## Supported contract and limits
 

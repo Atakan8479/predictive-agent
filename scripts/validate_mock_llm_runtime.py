@@ -212,6 +212,9 @@ def compare_pair(
         if expected_content is not None
         else None
     )
+    semantic_comparable = (
+        controlled_expected_match if expected_content is not None else outputs_equal
+    )
     if actions_equal and length_equivalent:
         equivalence = "executable_action_equivalent"
     elif actions_equal:
@@ -237,6 +240,8 @@ def compare_pair(
         "semantic_equivalence": (
             "controlled_expected_text"
             if controlled_expected_match is True
+            else "controlled_expected_text_mismatch"
+            if controlled_expected_match is False
             else "canonical_output_equal"
             if outputs_equal
             else "not_established"
@@ -247,7 +252,7 @@ def compare_pair(
         "controlled_expected_match": controlled_expected_match,
         "first_meaningful_comparable": True,
         "tool_ready_comparable": actions_equal,
-        "total_duration_comparable": outputs_equal and length_equivalent,
+        "total_duration_comparable": bool(semantic_comparable and length_equivalent),
         "ollama": ollama,
         "mock": mock,
         "control_mock": control_mock,
