@@ -23,6 +23,7 @@ from scripts.calibrate_mock_llm import (
     measure_stream,
     runtime_final_cases,
     summarize_errors,
+    supplementary_text_duration_cases,
     validation_cases,
 )
 
@@ -205,6 +206,12 @@ def compare_pair(
         float(mock["completion_tokens"]), float(ollama["actual_output_tokens"])
     )
     length_equivalent = output_token_error <= ACCEPTANCE_PERCENT
+    expected_content = case.get("expected_content")
+    controlled_expected_match = (
+        ollama["generated_content"] == mock["generated_content"] == expected_content
+        if expected_content is not None
+        else None
+    )
     if actions_equal and length_equivalent:
         equivalence = "executable_action_equivalent"
     elif actions_equal:
@@ -227,6 +234,17 @@ def compare_pair(
         "input_messages": case["messages"],
         "input_tools": case["tools"],
         "output_equivalence": equivalence,
+        "semantic_equivalence": (
+            "controlled_expected_text"
+            if controlled_expected_match is True
+            else "canonical_output_equal"
+            if outputs_equal
+            else "not_established"
+        ),
+        "canonical_output_equivalent": outputs_equal,
+        "token_length_comparable": length_equivalent,
+        "controlled_expected_content": expected_content,
+        "controlled_expected_match": controlled_expected_match,
         "first_meaningful_comparable": True,
         "tool_ready_comparable": actions_equal,
         "total_duration_comparable": outputs_equal and length_equivalent,
@@ -331,9 +349,18 @@ def validate(
     repetitions: int,
     *,
     final: bool,
+    text_duration: bool = False,
 ) -> dict[str, Any]:
     run_id = hashlib.sha256(str(time_ns()).encode()).hexdigest()[:16]
-    base_cases = runtime_final_cases() if final else validation_cases()
+    if final and text_duration:
+        raise ValueError("final and text-duration datasets are mutually exclusive")
+    base_cases = (
+        supplementary_text_duration_cases()
+        if text_duration
+        else runtime_final_cases()
+        if final
+        else validation_cases()
+    )
     cases = mark_cases(base_cases, f"{run_id}-paired", repetitions)
     timeout = httpx.Timeout(120.0, connect=5.0, read=120.0, write=10.0, pool=5.0)
     samples: list[dict[str, Any]] = []
@@ -370,7 +397,7 @@ def validate(
             mock = measure_mock_stream(mock_client, case)
             samples.append(compare_pair(case, ollama, mock, control_mock))
     case_results = aggregate(samples)
-    runtime_fit = None if final else _fit_runtime_timing(samples)
+    runtime_fit = None if final or text_duration else _fit_runtime_timing(samples)
     comparable_tools = [
         float(case["tool_ready_error_percent"])
         for case in case_results
@@ -397,7 +424,13 @@ def validate(
             "generated_at": datetime.now(UTC).isoformat(),
             "run_id": run_id,
             "source_commit": _source_commit(),
-            "dataset": "final" if final else "development",
+            "dataset": (
+                "supplementary-text-duration-final"
+                if text_duration
+                else "final"
+                if final
+                else "development"
+            ),
             "repetitions": repetitions,
             "acceptance_percent": ACCEPTANCE_PERCENT,
             "ollama_url": ollama_url,
@@ -422,6 +455,13 @@ def validate(
                 "Tool timing is comparable only for one identical schema-valid action. Total "
                 "timing additionally requires canonical output and completion-token lengths "
                 "within the acceptance threshold."
+            ),
+            "controlled_text_policy": (
+                "Supplementary text cases are semantically comparable only when Ollama and "
+                "the mock both reproduce the predeclared expected text exactly. Total timing "
+                "also requires completion-token lengths within the acceptance threshold."
+                if text_duration
+                else None
             ),
             "cache_control": "Ollama cache_prompt=false with unique run/repetition prefixes",
             "warmup_excluded": True,
@@ -517,10 +557,13 @@ def main() -> None:
     parser.add_argument("--model", default="qwen3.5:9b-q4_K_M")
     parser.add_argument("--repetitions", type=int, default=2)
     parser.add_argument("--final", action="store_true")
+    parser.add_argument("--text-duration", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.repetitions < 1:
         raise SystemExit("repetitions must be at least one")
+    if args.final and args.text_duration:
+        raise SystemExit("--final and --text-duration are mutually exclusive")
     try:
         result = validate(
             args.ollama_url,
@@ -528,6 +571,7 @@ def main() -> None:
             args.model,
             args.repetitions,
             final=args.final,
+            text_duration=args.text_duration,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         with args.output.open("x", encoding="utf-8") as output:

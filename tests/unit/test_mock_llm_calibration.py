@@ -12,6 +12,7 @@ from scripts.calibrate_mock_llm import (
     measure_stream,
     runtime_final_cases,
     summarize_errors,
+    supplementary_text_duration_cases,
     training_cases,
     validation_cases,
 )
@@ -54,6 +55,21 @@ def test_runtime_final_cases_are_new_and_cover_paired_acceptance_scope() -> None
         "multi-turn-tool",
     }
     assert sum(case["category"] == "tool-call" for case in final) == 5
+
+
+def test_supplementary_text_duration_cases_are_controlled_and_distinct() -> None:
+    cases = supplementary_text_duration_cases()
+    prior_names = {
+        case["name"] for case in training_cases() + validation_cases() + runtime_final_cases()
+    }
+
+    assert len(cases) == 5
+    assert prior_names.isdisjoint(case["name"] for case in cases)
+    assert all(case["expected_content"] for case in cases)
+    assert len({case["output_tokens"] for case in cases}) == 3
+    assert sum(case["category"].startswith("controlled-post-tool") for case in cases) == 3
+    assert any("Sipariş" in case["expected_content"] for case in cases)
+    assert any('"customer_id"' in case["expected_content"] for case in cases)
 
 
 def test_cache_nonce_cannot_be_confused_with_tool_argument() -> None:

@@ -47,6 +47,7 @@ class Case(TypedDict):
     tools: list[dict[str, Any]]
     output_tokens: NotRequired[int]
     base_name: NotRequired[str]
+    expected_content: NotRequired[str]
 
 
 def training_cases() -> list[Case]:
@@ -526,6 +527,93 @@ def runtime_final_cases() -> list[Case]:
             ],
             "output_tokens": 64,
         },
+    ]
+
+
+def supplementary_text_duration_cases() -> list[Case]:
+    """Return controlled text cases declared before supplementary final measurement."""
+    exact = (
+        "Return exactly the text between <answer> and </answer>. "
+        "Do not add, remove, translate, or reformat anything."
+    )
+    default = "Mock response complete."
+
+    def ordinary(name: str, category: str, prompt: str) -> Case:
+        return {
+            "name": name,
+            "category": category,
+            "messages": [
+                {"role": "system", "content": f"{exact} <answer>{default}</answer>"},
+                {"role": "user", "content": prompt},
+            ],
+            "tools": [],
+            "output_tokens": 16,
+            "expected_content": default,
+        }
+
+    def after_tool(
+        name: str,
+        category: str,
+        tool_content: str,
+        output_tokens: int,
+    ) -> Case:
+        expected = f"Mock final answer: {tool_content}"
+        return {
+            "name": name,
+            "category": category,
+            "messages": [
+                {"role": "system", "content": f"{exact} <answer>{expected}</answer>"},
+                {"role": "user", "content": "Report the verified result exactly."},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": f"call_{name}",
+                            "type": "function",
+                            "function": {
+                                "name": "get_order",
+                                "arguments": {"order_id": "ORD-0137"},
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": f"call_{name}", "content": tool_content},
+            ],
+            "tools": [_lookup_tool("get_order", "order_id")],
+            "output_tokens": output_tokens,
+            "expected_content": expected,
+        }
+
+    return [
+        ordinary(
+            "text-duration-english-short",
+            "controlled-text",
+            "Provide the requested response.",
+        ),
+        ordinary(
+            "text-duration-english-long",
+            "controlled-text-long-prompt",
+            ("Use the exact requested response without commentary. " * 32).strip(),
+        ),
+        after_tool(
+            "text-duration-post-tool-short",
+            "controlled-post-tool",
+            '{"status":"paid"}',
+            32,
+        ),
+        after_tool(
+            "text-duration-post-tool-turkish",
+            "controlled-post-tool-turkish",
+            "Sipariş teslim edildi.",
+            32,
+        ),
+        after_tool(
+            "text-duration-post-tool-json",
+            "controlled-post-tool-json",
+            '{"customer_id":"CUST-073","name":"Ada Yılmaz","tier":"gold","verified":true}',
+            64,
+        ),
     ]
 
 
