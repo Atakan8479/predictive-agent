@@ -99,6 +99,11 @@ tool/TTFT ±15% results, unresolved controlled-text total-duration criterion, ra
 limitations are in
 [the calibration report](docs/benchmarks/mock-llm-calibration.md).
 
+The M1.5 software implementation is complete and sufficient for the M1.6 asynchronous provider
+client. Broader controlled-text timing validation remains partially complete and is tracked in
+[Issue #17](https://github.com/Atakan8479/predictive-agent/issues/17) for execution after the
+representative synchronous agent path exists and before final comparative benchmark claims.
+
 ## Environment check and LLM baseline
 
 ```bash

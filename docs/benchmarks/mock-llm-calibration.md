@@ -143,6 +143,68 @@ The experiment was retained without changing prompts, timing constants, or accep
 Controlled text total-duration accuracy therefore remains explicitly unresolved, and M1.5 is
 not fully closed by the available evidence.
 
+First meaningful output was within ±15% for 7/15 supplementary measurements. Its median
+error was 20.02% and maximum error was 34.85%. This does not invalidate the November 15
+result, where all 24 measurements passed with an 11.68% maximum, but it means TTFT accuracy
+has not been established across the broader controlled-text workload.
+
+## M1.5 status and experimental limitations
+
+| Component | Status |
+|---|---|
+| Mock LLM software implementation | Complete |
+| OpenAI-compatible response handling | Pass |
+| Deterministic tool-call loops | Pass |
+| Buffered executable tool timing | Pass |
+| Comparable tool total-duration validation | Pass |
+| Empirical token estimation | Implemented; limitations documented |
+| Original paired-runtime TTFT validation | Pass |
+| Broader controlled-text TTFT generalization | Partial pass |
+| Controlled text total-duration validation | Unresolved |
+| Docker lifecycle and automated tests | Pass |
+| Reproducible experimental evidence | Pass |
+| Overall M1.5 experimental validation | Partially complete |
+
+The remaining limits are:
+
+1. **Controlled text duration:** no supplementary sample met both the predeclared exact-output
+   and token-length equivalence rules, so text total-duration accuracy remains unverified.
+2. **TTFT generalization:** the November 15 workload passed 24/24 measurements, while the
+   broader November 16 controlled-text workload passed 7/15.
+3. **Prompt-token estimation:** final paired error was 10.01% median and 61.18% maximum. The
+   estimator is a lightweight benchmark approximation, not tokenizer-equivalent.
+4. **Output equivalence:** future work must declare semantic, canonical, completion-length,
+   executable-action, and computational-workload equivalence before collecting final data.
+   The unsuccessful November 16 run is not retroactively reclassified.
+5. **Environment dependence:** calibration applies to the recorded model, quantization,
+   hardware, software, prompt template, and workload scope; unrestricted generalization is not
+   claimed.
+
+Follow-up Issue [#17](https://github.com/Atakan8479/predictive-agent/issues/17) is deliberately
+scheduled after the representative M1.8–M1.10 synchronous path exists and before M1.11 final
+benchmark collection or later M2/M4 comparative conclusions.
+
+## M1.6 handoff
+
+M1.6 can proceed because it depends on the implemented provider contract, not unrestricted
+timing generalization. The available interfaces and configuration are:
+
+- Ollama and the mock are both exposed through OpenAI-compatible base URLs selected by
+  `PA_LLM_BASE_URL`, `PA_LLM_MODEL`, and `PA_LLM_API_KEY`.
+- Ollama-specific `PA_LLM_THINK`, `PA_OLLAMA_URL`, and `PA_OLLAMA_KEEP_ALIVE` are centralized in
+  `Settings`; `PA_HTTP_TIMEOUT_S` supplies the current network timeout default.
+- The mock serves regular and SSE `POST /v1/chat/completions` plus `GET /healthz` at the Compose
+  service published on port 8090 by default.
+- Mock timing remains frozen at 77.282 ms base latency, 3,089.067 prompt tokens/s, and 64.340
+  completion tokens/s, with existing `PA_MOCK_LLM_*` settings and request-header overrides.
+- Regular responses, streaming, deterministic calls for all five tools, post-tool responses,
+  usage accounting, and explicit validation failures are covered by unit and integration tests.
+
+Issue #6 should add the provider-independent asynchronous client, absolute deadline, bounded
+connection/429 retry behavior, and `agent.llm_turn` instrumentation without changing the mock
+runtime. The unresolved text-timing limits matter for later comparative performance claims, not
+for provider switching or client correctness.
+
 ## Reproduction
 
 Training/development calibration writes a new non-overwritable artifact:
