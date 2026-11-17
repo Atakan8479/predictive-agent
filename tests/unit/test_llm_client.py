@@ -1,13 +1,17 @@
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, aclosing
 from types import TracebackType
 from typing import Any, cast
 
 import httpx2
 import pytest
 from openai import APIConnectionError, AsyncOpenAI, BadRequestError, RateLimitError
-from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from openai.types.chat import ChatCompletion, ChatCompletionChunk, ChatCompletionToolUnionParam
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Status, Tracer
 
 from predictive_agent.config import Settings
@@ -22,6 +26,24 @@ from predictive_agent.llm.client import (
 
 def _settings(**overrides: Any) -> Settings:
     return Settings(_env_file=None, **overrides)  # pyright: ignore[reportCallIssue]
+
+
+def _tool(name: str, *required: str) -> ChatCompletionToolUnionParam:
+    return cast(
+        ChatCompletionToolUnionParam,
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "parameters": {
+                    "type": "object",
+                    "properties": {item: {"type": "string"} for item in required},
+                    "required": list(required),
+                    "additionalProperties": False,
+                },
+            },
+        },
+    )
 
 
 def _completion(
@@ -152,6 +174,17 @@ class _BlockingStream:
         self.closed = True
 
 
+class _FirstThenBlockingStream(_FakeStream):
+    def __init__(self, waiting: asyncio.Event) -> None:
+        super().__init__([])
+        self.waiting = waiting
+
+    async def _iterate(self) -> AsyncIterator[ChatCompletionChunk]:
+        yield _chunk(content="first")
+        self.waiting.set()
+        await asyncio.Event().wait()
+
+
 class _FakeCompletions:
     def __init__(self, outcomes: list[object | Exception]) -> None:
         self.outcomes = outcomes
@@ -164,6 +197,8 @@ class _FakeCompletions:
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
+        if isinstance(outcome, Awaitable):
+            return await cast(Awaitable[object], outcome)
         return outcome
 
 
@@ -187,6 +222,7 @@ class _FakeSpan:
         self.attributes: dict[str, object] = {}
         self.exceptions: list[Exception] = []
         self.status: Status | None = None
+        self.end_count = 0
 
     def set_attribute(self, key: str, value: object) -> None:
         self.attributes[key] = value
@@ -196,6 +232,9 @@ class _FakeSpan:
 
     def set_status(self, status: Status) -> None:
         self.status = status
+
+    def end(self, *_: object, **__: object) -> None:
+        self.end_count += 1
 
 
 class _SpanContext(AbstractContextManager[_FakeSpan]):
@@ -211,7 +250,7 @@ class _SpanContext(AbstractContextManager[_FakeSpan]):
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        return None
+        self.span.end()
 
 
 class _FakeTracer:
@@ -223,19 +262,23 @@ class _FakeTracer:
         self.names.append(name)
         return _SpanContext(self.span)
 
+    def start_span(self, name: str, **_: object) -> _FakeSpan:
+        self.names.append(name)
+        return self.span
+
 
 def _client(
     outcomes: list[object | Exception],
     *,
     settings: Settings | None = None,
-    tracer: _FakeTracer | None = None,
+    tracer: Tracer | _FakeTracer | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> tuple[LLMClient, _FakeSDK]:
     sdk = _FakeSDK(outcomes)
     client = LLMClient(
         settings or _settings(llm_provider="mock", llm_api_key="mock"),
         sdk_client=cast(AsyncOpenAI, sdk),
-        tracer=cast(Tracer, tracer) if tracer is not None else None,
+        tracer=cast(Tracer, tracer),
         sleep=sleep,
     )
     return client, sdk
@@ -279,7 +322,11 @@ async def test_regular_completion_preserves_usage_tools_and_messages() -> None:
         {"role": "tool", "tool_call_id": "call_order", "content": '{"status":"paid"}'},
     ]
 
-    result = await client.complete(cast(Any, messages), max_completion_tokens=64)
+    result = await client.complete(
+        cast(Any, messages),
+        tools=[_tool("get_order", "order_id")],
+        max_completion_tokens=64,
+    )
 
     assert result.metrics.usage.prompt_tokens == 11
     assert result.metrics.usage.completion_tokens == 4
@@ -335,16 +382,16 @@ async def test_stream_assembles_fragmented_multiple_tool_calls() -> None:
             _chunk(
                 tool_calls=[
                     {
-                        "index": 0,
-                        "id": "call_order",
-                        "type": "function",
-                        "function": {"name": "get_order", "arguments": '{"order_'},
-                    },
-                    {
                         "index": 1,
                         "id": "call_product",
                         "type": "function",
                         "function": {"name": "get_product", "arguments": '{"sku":"'},
+                    },
+                    {
+                        "index": 0,
+                        "id": "call_order",
+                        "type": "function",
+                        "function": {"name": "get_order", "arguments": '{"order_'},
                     },
                 ]
             ),
@@ -360,7 +407,13 @@ async def test_stream_assembles_fragmented_multiple_tool_calls() -> None:
     )
     client, _ = _client([stream])
 
-    events = [event async for event in client.stream([{"role": "user", "content": "lookup"}])]
+    events = [
+        event
+        async for event in client.stream(
+            [{"role": "user", "content": "lookup"}],
+            tools=[_tool("get_order", "order_id"), _tool("get_product", "sku")],
+        )
+    ]
 
     ready = [event.tool_call for event in events if event.type == "tool_call_ready"]
     assert len(ready) == 2
@@ -374,6 +427,7 @@ async def test_stream_assembles_fragmented_multiple_tool_calls() -> None:
     assert result.metrics.first_tool_call_delta_s is not None
     assert result.metrics.first_tool_call_ready_s is not None
     assert [call.index for call in result.tool_calls] == [0, 1]
+    assert sum(event.type == "completed" for event in events) == 1
 
 
 async def test_stream_keeps_malformed_tool_arguments_non_executable() -> None:
@@ -394,12 +448,207 @@ async def test_stream_keeps_malformed_tool_arguments_non_executable() -> None:
     )
     client, _ = _client([stream])
 
-    events = [event async for event in client.stream([{"role": "user", "content": "lookup"}])]
+    events = [
+        event
+        async for event in client.stream(
+            [{"role": "user", "content": "lookup"}],
+            tools=[_tool("get_order", "order_id")],
+        )
+    ]
 
     assert all(event.type != "tool_call_ready" for event in events)
     result = events[-1].result
     assert result is not None
     assert not result.tool_calls[0].executable
+    assert result.tool_calls[0].readiness_error == "arguments_not_json_object"
+
+
+async def test_parseable_tool_arguments_are_not_ready_before_finalization() -> None:
+    stream = _FakeStream(
+        [
+            _chunk(
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "call_order",
+                        "type": "function",
+                        "function": {
+                            "name": "get_order",
+                            "arguments": '{"order_id":"ORD-0042"}',
+                        },
+                    }
+                ]
+            ),
+            _chunk(finish_reason="tool_calls"),
+        ]
+    )
+    client, _ = _client([stream])
+    events = client.stream(
+        [{"role": "user", "content": "lookup"}],
+        tools=[_tool("get_order", "order_id")],
+    )
+
+    delta = await anext(events)
+    assert delta.type == "tool_call_delta"
+    assert delta.tool_call is not None
+    assert not delta.tool_call.executable
+    assert delta.tool_call.readiness_error == "generation_not_finalized"
+
+    ready = await anext(events)
+    assert ready.type == "tool_call_ready"
+    assert ready.tool_call is not None
+    assert ready.tool_call.executable
+    await events.aclose()
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments", "expected_error"),
+    [
+        ("get_order", '{"unexpected":1}', "missing_required_arguments"),
+        ("unknown_tool", '{"order_id":"ORD-0042"}', "unknown_tool"),
+    ],
+)
+async def test_finalized_tool_calls_fail_the_explicit_readiness_gate(
+    name: str, arguments: str, expected_error: str
+) -> None:
+    stream = _FakeStream(
+        [
+            _chunk(
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "call_test",
+                        "type": "function",
+                        "function": {"name": name, "arguments": arguments},
+                    }
+                ],
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    client, _ = _client([stream])
+
+    events = [
+        event
+        async for event in client.stream(
+            [{"role": "user", "content": "lookup"}],
+            tools=[_tool("get_order", "order_id")],
+        )
+    ]
+
+    assert all(event.type != "tool_call_ready" for event in events)
+    result = events[-1].result
+    assert result is not None
+    call = result.tool_calls[0]
+    assert call.finalized
+    assert not call.executable
+    assert call.readiness_error == expected_error
+    if expected_error == "missing_required_arguments":
+        assert call.missing_required_arguments == ("order_id",)
+
+
+async def test_tool_call_without_finish_reason_remains_unfinalized() -> None:
+    stream = _FakeStream(
+        [
+            _chunk(
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "call_order",
+                        "type": "function",
+                        "function": {
+                            "name": "get_order",
+                            "arguments": '{"order_id":"ORD-0042"}',
+                        },
+                    }
+                ]
+            )
+        ]
+    )
+    client, _ = _client([stream])
+
+    events = [
+        event
+        async for event in client.stream(
+            [{"role": "user", "content": "lookup"}],
+            tools=[_tool("get_order", "order_id")],
+        )
+    ]
+
+    assert [event.type for event in events] == ["tool_call_delta", "completed"]
+    result = events[-1].result
+    assert result is not None
+    assert result.tool_calls[0].readiness_error == "generation_not_finalized"
+
+
+async def test_repeated_identity_is_allowed_but_conflicting_identity_is_rejected() -> None:
+    repeated = _FakeStream(
+        [
+            _chunk(
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "call_order",
+                        "type": "function",
+                        "function": {"name": "get_order", "arguments": "{"},
+                    }
+                ]
+            ),
+            _chunk(
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "call_order",
+                        "type": "function",
+                        "function": {"name": "get_order", "arguments": "}"},
+                    }
+                ],
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+    repeated_client, _ = _client([repeated])
+    repeated_events = [
+        event
+        async for event in repeated_client.stream(
+            [{"role": "user", "content": "lookup"}], tools=[_tool("get_order")]
+        )
+    ]
+    assert sum(event.type == "tool_call_ready" for event in repeated_events) == 1
+
+    conflicting = _FakeStream(
+        [
+            _chunk(
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "call_order",
+                        "type": "function",
+                        "function": {"name": "get_order", "arguments": "{"},
+                    }
+                ]
+            ),
+            _chunk(
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "call_changed",
+                        "type": "function",
+                        "function": {"name": "get_order", "arguments": "}"},
+                    }
+                ]
+            ),
+        ]
+    )
+    conflicting_client, _ = _client([conflicting])
+
+    with pytest.raises(LLMProtocolError, match="changed a streamed tool-call identifier"):
+        _ = [
+            event
+            async for event in conflicting_client.stream(
+                [{"role": "user", "content": "lookup"}], tools=[_tool("get_order")]
+            )
+        ]
 
 
 async def test_empty_regular_and_stream_responses_are_rejected() -> None:
@@ -540,6 +789,81 @@ async def test_expired_deadline_fails_before_request() -> None:
     assert not sdk.completions.calls
 
 
+async def test_stream_deadline_does_not_cancel_consumer_work_between_deltas() -> None:
+    stream = _FakeStream([_chunk(content="first"), _chunk(content="second", finish_reason="stop")])
+    client, _ = _client([stream])
+    events = client.stream(
+        [{"role": "user", "content": "hello"}],
+        deadline=asyncio.get_running_loop().time() + 0.05,
+    )
+
+    first = await anext(events)
+    assert first.content_delta == "first"
+    unrelated_work_completed = False
+    await asyncio.sleep(0.08)
+    unrelated_work_completed = True
+
+    assert unrelated_work_completed
+    with pytest.raises(LLMDeadlineExceeded):
+        await anext(events)
+    assert stream.closed
+
+
+async def test_consumer_can_await_unrelated_work_before_requesting_next_delta() -> None:
+    stream = _FakeStream([_chunk(content="first"), _chunk(content="second", finish_reason="stop")])
+    client, _ = _client([stream])
+    events = client.stream([{"role": "user", "content": "hello"}])
+    work_completed = asyncio.Event()
+
+    first = await anext(events)
+
+    async def unrelated_work() -> None:
+        await asyncio.sleep(0)
+        work_completed.set()
+
+    await unrelated_work()
+    second = await anext(events)
+    assert first.content_delta == "first"
+    assert work_completed.is_set()
+    assert second.content_delta == "second"
+    await events.aclose()
+
+
+async def test_deadline_expires_while_waiting_for_next_provider_chunk() -> None:
+    waiting = asyncio.Event()
+    stream = _FirstThenBlockingStream(waiting)
+    client, _ = _client([stream])
+    events = client.stream(
+        [{"role": "user", "content": "hello"}],
+        deadline=asyncio.get_running_loop().time() + 0.05,
+    )
+
+    first = await anext(events)
+    assert first.content_delta == "first"
+    with pytest.raises(LLMDeadlineExceeded):
+        await anext(events)
+
+    assert waiting.is_set()
+    assert stream.closed
+
+
+async def test_deadline_expires_during_initial_stream_connection() -> None:
+    pending: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+    client, sdk = _client([pending])
+
+    with pytest.raises(LLMDeadlineExceeded):
+        _ = [
+            event
+            async for event in client.stream(
+                [{"role": "user", "content": "hello"}],
+                deadline=asyncio.get_running_loop().time() + 0.02,
+            )
+        ]
+
+    assert pending.cancelled()
+    assert len(sdk.completions.calls) == 1
+
+
 async def test_backoff_cannot_extend_absolute_deadline() -> None:
     client, _ = _client(
         [_connection_error()],
@@ -605,6 +929,99 @@ async def test_timeout_and_cancellation_close_active_stream() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert cancel_stream.closed
+
+
+async def test_cancellation_during_consumer_processing_does_not_enter_generator() -> None:
+    stream = _FakeStream([_chunk(content="first"), _chunk(content="second", finish_reason="stop")])
+    tracer = _FakeTracer()
+    client, _ = _client([stream], tracer=tracer)
+    processing = asyncio.Event()
+
+    async def consume() -> None:
+        async with aclosing(client.stream([{"role": "user", "content": "hello"}])) as events:
+            first = await anext(events)
+            assert first.content_delta == "first"
+            processing.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(consume())
+    await processing.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert stream.closed
+    assert tracer.span.attributes["llm.outcome"] == "abandoned"
+    assert tracer.span.end_count == 1
+
+
+async def test_explicit_early_stream_closure_is_deterministic() -> None:
+    stream = _FakeStream([_chunk(content="first"), _chunk(content="second", finish_reason="stop")])
+    tracer = _FakeTracer()
+    client, _ = _client([stream], tracer=tracer)
+    events = client.stream([{"role": "user", "content": "hello"}])
+
+    assert (await anext(events)).content_delta == "first"
+    await events.aclose()
+
+    assert stream.closed
+    assert tracer.span.attributes["llm.outcome"] == "abandoned"
+    assert tracer.span.end_count == 1
+
+
+async def test_real_opentelemetry_context_does_not_leak_across_yields() -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("tests.llm")
+    stream = _FakeStream([_chunk(content="first"), _chunk(finish_reason="stop")])
+    client, _ = _client([stream], tracer=tracer)
+
+    with tracer.start_as_current_span("agent.parent") as parent:
+        parent_id = parent.get_span_context().span_id
+        events = client.stream([{"role": "user", "content": "hello"}])
+        first = await anext(events)
+        assert first.content_delta == "first"
+        assert trace.get_current_span().get_span_context().span_id == parent_id
+
+        with tracer.start_as_current_span("consumer.tool"):
+            pass
+
+        completed = await anext(events)
+        assert completed.type == "completed"
+        assert trace.get_current_span().get_span_context().span_id == parent_id
+        await events.aclose()
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    llm_span = spans["agent.llm_turn"]
+    consumer_span = spans["consumer.tool"]
+    assert llm_span.parent is not None
+    assert llm_span.parent.span_id == parent_id
+    assert consumer_span.parent is not None
+    assert consumer_span.parent.span_id == parent_id
+    assert llm_span.context is not None
+    assert consumer_span.parent.span_id != llm_span.context.span_id
+
+
+async def test_real_opentelemetry_span_ends_on_early_close_without_context_leak() -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("tests.llm.early-close")
+    stream = _FakeStream([_chunk(content="first"), _chunk(content="second", finish_reason="stop")])
+    client, _ = _client([stream], tracer=tracer)
+
+    with tracer.start_as_current_span("agent.parent") as parent:
+        parent_id = parent.get_span_context().span_id
+        events = client.stream([{"role": "user", "content": "hello"}])
+        assert (await anext(events)).content_delta == "first"
+        await events.aclose()
+        assert trace.get_current_span().get_span_context().span_id == parent_id
+
+    llm_spans = [span for span in exporter.get_finished_spans() if span.name == "agent.llm_turn"]
+    assert len(llm_spans) == 1
+    assert llm_spans[0].attributes is not None
+    assert llm_spans[0].attributes["llm.outcome"] == "abandoned"
 
 
 async def test_stream_failure_after_partial_output_is_not_retried() -> None:

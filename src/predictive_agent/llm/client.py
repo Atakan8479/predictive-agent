@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -69,10 +69,40 @@ class LLMToolCall:
     name: str | None
     arguments: str
     parsed_arguments: dict[str, Any] | None
+    finalized: bool
+    recognized: bool
+    missing_required_arguments: tuple[str, ...]
 
     @property
     def executable(self) -> bool:
-        return self.id is not None and self.name is not None and self.parsed_arguments is not None
+        """Whether this finalized known call passes the client's top-level readiness gate.
+
+        The tool layer must still validate the complete JSON Schema before execution.
+        """
+        return (
+            self.finalized
+            and self.id is not None
+            and self.name is not None
+            and self.recognized
+            and self.parsed_arguments is not None
+            and not self.missing_required_arguments
+        )
+
+    @property
+    def readiness_error(self) -> str | None:
+        if not self.finalized:
+            return "generation_not_finalized"
+        if self.id is None:
+            return "missing_id"
+        if self.name is None:
+            return "missing_name"
+        if not self.recognized:
+            return "unknown_tool"
+        if self.parsed_arguments is None:
+            return "arguments_not_json_object"
+        if self.missing_required_arguments:
+            return "missing_required_arguments"
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,9 +145,8 @@ class _ToolAccumulator:
     id: str | None = None
     name: str | None = None
     arguments: str = ""
-    ready_emitted: bool = False
 
-    def snapshot(self) -> LLMToolCall:
+    def snapshot(self, *, finalized: bool, contracts: dict[str, frozenset[str]]) -> LLMToolCall:
         parsed: dict[str, Any] | None = None
         try:
             value = json.loads(self.arguments)
@@ -125,7 +154,21 @@ class _ToolAccumulator:
             value = None
         if isinstance(value, dict):
             parsed = cast(dict[str, Any], value)
-        return LLMToolCall(self.index, self.id, self.name, self.arguments, parsed)
+        recognized = self.name in contracts
+        required: frozenset[str] = (
+            contracts.get(self.name, frozenset()) if self.name is not None else frozenset()
+        )
+        missing = tuple(sorted(required.difference(parsed))) if parsed is not None else ()
+        return LLMToolCall(
+            self.index,
+            self.id,
+            self.name,
+            self.arguments,
+            parsed,
+            finalized,
+            recognized,
+            missing,
+        )
 
 
 class LLMClient:
@@ -231,7 +274,9 @@ class LLMClient:
                     )
                     result = LLMResult(
                         content=choice.message.content,
-                        tool_calls=self._response_tool_calls(choice.message.tool_calls),
+                        tool_calls=self._response_tool_calls(
+                            choice.message.tool_calls, self._tool_contracts(tools)
+                        ),
                         finish_reason=choice.finish_reason,
                         metrics=metrics,
                     )
@@ -311,16 +356,19 @@ class LLMClient:
         tool_choice: ChatCompletionToolChoiceOptionParam | None = None,
         max_completion_tokens: int | None = None,
         deadline: float | None = None,
-    ) -> AsyncIterator[LLMStreamEvent]:
+    ) -> AsyncGenerator[LLMStreamEvent, None]:
         """Yield meaningful deltas and one terminal event containing the final result.
 
-        Retry is allowed only before any text or tool-call delta is yielded. A failure after
-        partial output raises ``LLMPartialStreamError`` to prevent duplicate content or tools.
+        Provider awaits share one absolute deadline, but no timeout or tracing context remains
+        active while the consumer handles a yielded event. Retry is allowed only before any text
+        or tool-call delta is yielded. Callers that may stop early should use ``aclosing()`` for
+        deterministic stream cleanup.
         """
         self._ensure_open()
         loop = asyncio.get_running_loop()
         started = loop.time()
         absolute_deadline = self._resolve_deadline(deadline, started)
+        contracts = self._tool_contracts(tools)
         attempts = 0
         rate_limits = 0
         first_event: float | None = None
@@ -329,84 +377,129 @@ class LLMClient:
         first_tool_delta: float | None = None
         first_tool_ready: float | None = None
         exposed = False
-        with self._tracer.start_as_current_span("agent.llm_turn") as span:
-            self._start_span(span)
+        span = self._tracer.start_span("agent.llm_turn")
+        span_ended = False
+        self._start_span(span)
+        try:
             while True:
                 attempts += 1
                 content: list[str] = []
                 calls: dict[int, _ToolAccumulator] = {}
                 returned_model: str | None = None
                 finish_reason: str | None = None
+                tool_calls_finalized = False
+                tool_calls_finalized_at: float | None = None
                 usage = LLMUsage(None, None, None)
                 try:
                     remaining = self._remaining(absolute_deadline)
-                    async with asyncio.timeout_at(absolute_deadline):
-                        stream = cast(
-                            AsyncStream[ChatCompletionChunk],
-                            await self._client.chat.completions.create(
-                                **self._request_parameters(
-                                    messages,
-                                    tools=tools,
-                                    tool_choice=tool_choice,
-                                    max_completion_tokens=max_completion_tokens,
-                                    stream=True,
-                                    timeout=remaining,
+                    with trace.use_span(
+                        span,
+                        end_on_exit=False,
+                        record_exception=False,
+                        set_status_on_exception=False,
+                    ):
+                        async with asyncio.timeout_at(absolute_deadline):
+                            stream = cast(
+                                AsyncStream[ChatCompletionChunk],
+                                await self._client.chat.completions.create(
+                                    **self._request_parameters(
+                                        messages,
+                                        tools=tools,
+                                        tool_choice=tool_choice,
+                                        max_completion_tokens=max_completion_tokens,
+                                        stream=True,
+                                        timeout=remaining,
+                                    )
+                                ),
+                            )
+                    async with stream:
+                        iterator = stream.__aiter__()
+                        while True:
+                            self._remaining(absolute_deadline)
+                            try:
+                                with trace.use_span(
+                                    span,
+                                    end_on_exit=False,
+                                    record_exception=False,
+                                    set_status_on_exception=False,
+                                ):
+                                    async with asyncio.timeout_at(absolute_deadline):
+                                        chunk = await anext(iterator)
+                            except StopAsyncIteration:
+                                break
+                            observed = loop.time()
+                            if first_event is None:
+                                first_event = observed - started
+                            returned_model = chunk.model
+                            if chunk.usage is not None:
+                                usage = self._usage(chunk.usage)
+                            if not chunk.choices:
+                                continue
+                            choice = chunk.choices[0]
+                            delta = choice.delta
+                            tool_parts = delta.tool_calls or []
+                            if tool_calls_finalized and tool_parts:
+                                raise LLMProtocolError(
+                                    "provider emitted a tool-call delta after finalization"
                                 )
-                            ),
-                        )
-                        async with stream:
-                            async for chunk in stream:
-                                observed = loop.time()
-                                if first_event is None:
-                                    first_event = observed - started
-                                returned_model = chunk.model
-                                if chunk.usage is not None:
-                                    usage = self._usage(chunk.usage)
-                                if not chunk.choices:
-                                    continue
-                                choice = chunk.choices[0]
-                                if choice.finish_reason is not None:
-                                    finish_reason = choice.finish_reason
-                                delta = choice.delta
-                                if delta.content:
-                                    if first_text is None:
-                                        first_text = observed - started
+                            if delta.content:
+                                if first_text is None:
+                                    first_text = observed - started
+                                if first_meaningful is None:
+                                    first_meaningful = observed - started
+                                content.append(delta.content)
+                                exposed = True
+                                yield LLMStreamEvent("text_delta", content_delta=delta.content)
+                            for part in tool_parts:
+                                accumulator = calls.setdefault(
+                                    part.index, _ToolAccumulator(index=part.index)
+                                )
+                                name = part.function.name if part.function is not None else None
+                                arguments = (
+                                    part.function.arguments if part.function is not None else None
+                                )
+                                if part.id is not None:
+                                    if accumulator.id not in {None, part.id}:
+                                        raise LLMProtocolError(
+                                            "provider changed a streamed tool-call identifier"
+                                        )
+                                    accumulator.id = part.id
+                                if name is not None:
+                                    if accumulator.name not in {None, name}:
+                                        raise LLMProtocolError(
+                                            "provider changed a streamed tool-call name"
+                                        )
+                                    accumulator.name = name
+                                if arguments:
+                                    accumulator.arguments += arguments
+                                snapshot = accumulator.snapshot(
+                                    finalized=False, contracts=contracts
+                                )
+                                if part.id or name or arguments:
+                                    if first_tool_delta is None:
+                                        first_tool_delta = observed - started
                                     if first_meaningful is None:
                                         first_meaningful = observed - started
-                                    content.append(delta.content)
                                     exposed = True
-                                    yield LLMStreamEvent("text_delta", content_delta=delta.content)
-                                for part in delta.tool_calls or []:
-                                    accumulator = calls.setdefault(
-                                        part.index, _ToolAccumulator(index=part.index)
-                                    )
-                                    if part.id is not None:
-                                        accumulator.id = part.id
-                                    name = part.function.name if part.function is not None else None
-                                    arguments = (
-                                        part.function.arguments
-                                        if part.function is not None
-                                        else None
-                                    )
-                                    if name is not None:
-                                        accumulator.name = name
-                                    if arguments:
-                                        accumulator.arguments += arguments
-                                    snapshot = accumulator.snapshot()
-                                    if part.id or name or arguments:
-                                        if first_tool_delta is None:
-                                            first_tool_delta = observed - started
-                                        if first_meaningful is None:
-                                            first_meaningful = observed - started
-                                        exposed = True
-                                        yield LLMStreamEvent("tool_call_delta", tool_call=snapshot)
-                                    if snapshot.executable and not accumulator.ready_emitted:
-                                        accumulator.ready_emitted = True
-                                        if first_tool_ready is None:
-                                            first_tool_ready = observed - started
-                                        yield LLMStreamEvent("tool_call_ready", tool_call=snapshot)
+                                    yield LLMStreamEvent("tool_call_delta", tool_call=snapshot)
+                            if choice.finish_reason is not None:
+                                finish_reason = choice.finish_reason
+                                if finish_reason == "tool_calls":
+                                    tool_calls_finalized = True
+                                    tool_calls_finalized_at = observed
                     if first_event is None:
                         raise LLMProtocolError("provider returned an empty stream")
+                    final_calls = tuple(
+                        calls[index].snapshot(finalized=tool_calls_finalized, contracts=contracts)
+                        for index in sorted(calls)
+                    )
+                    ready_calls = tuple(call for call in final_calls if call.executable)
+                    if ready_calls:
+                        ready_at = tool_calls_finalized_at or loop.time()
+                        if first_tool_ready is None:
+                            first_tool_ready = ready_at - started
+                        for call in ready_calls:
+                            yield LLMStreamEvent("tool_call_ready", tool_call=call)
                     metrics = self._metrics(
                         started,
                         returned_model=returned_model,
@@ -421,11 +514,13 @@ class LLMClient:
                     )
                     result = LLMResult(
                         content="".join(content) or None,
-                        tool_calls=tuple(calls[index].snapshot() for index in sorted(calls)),
+                        tool_calls=final_calls,
                         finish_reason=finish_reason,
                         metrics=metrics,
                     )
                     self._finish_span(span, metrics)
+                    span.end()
+                    span_ended = True
                     yield LLMStreamEvent("completed", result=result)
                     return
                 except asyncio.CancelledError:
@@ -506,6 +601,19 @@ class LLMClient:
                         rate_limits=rate_limits,
                     )
                     raise
+        except GeneratorExit:
+            if not span_ended:
+                self._fail_span(
+                    span,
+                    "abandoned",
+                    started=started,
+                    attempts=attempts,
+                    rate_limits=rate_limits,
+                )
+            raise
+        finally:
+            if not span_ended:
+                span.end()
 
     def _request_parameters(
         self,
@@ -615,8 +723,34 @@ class LLMClient:
         )
 
     @staticmethod
+    def _tool_contracts(
+        tools: Sequence[ChatCompletionToolUnionParam],
+    ) -> dict[str, frozenset[str]]:
+        contracts: dict[str, frozenset[str]] = {}
+        for raw_tool in tools:
+            tool = cast(dict[str, Any], raw_tool)
+            if tool.get("type") != "function":
+                continue
+            function = tool.get("function")
+            if not isinstance(function, dict):
+                continue
+            function_mapping = cast(dict[str, Any], function)
+            name = function_mapping.get("name")
+            if not isinstance(name, str):
+                continue
+            parameters = function_mapping.get("parameters")
+            if not isinstance(parameters, dict):
+                contracts[name] = frozenset()
+                continue
+            required = cast(dict[str, Any], parameters).get("required")
+            required_items = cast(list[object], required) if isinstance(required, list) else []
+            contracts[name] = frozenset(item for item in required_items if isinstance(item, str))
+        return contracts
+
+    @staticmethod
     def _response_tool_calls(
         tool_calls: Sequence[object] | None,
+        contracts: dict[str, frozenset[str]],
     ) -> tuple[LLMToolCall, ...]:
         results: list[LLMToolCall] = []
         if not isinstance(tool_calls, list):
@@ -630,7 +764,7 @@ class LLMClient:
                 name=raw_call.function.name,
                 arguments=raw_call.function.arguments,
             )
-            results.append(accumulator.snapshot())
+            results.append(accumulator.snapshot(finalized=True, contracts=contracts))
         return tuple(results)
 
     def _metrics(
@@ -696,7 +830,7 @@ class LLMClient:
     @staticmethod
     def _fail_span(
         span: Span,
-        outcome: Literal["error", "timeout", "cancelled"],
+        outcome: Literal["error", "timeout", "cancelled", "abandoned"],
         error: Exception | None = None,
         *,
         started: float,
@@ -711,5 +845,5 @@ class LLMClient:
         if error is not None:
             span.record_exception(error)
             span.set_status(Status(StatusCode.ERROR, type(error).__name__))
-        elif outcome != "cancelled":
+        elif outcome in {"error", "timeout"}:
             span.set_status(Status(StatusCode.ERROR, outcome))

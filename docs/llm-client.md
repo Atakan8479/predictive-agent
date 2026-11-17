@@ -52,6 +52,8 @@ retry policy is disabled so there is one observable retry policy.
 ## Interface and lifecycle
 
 ```python
+from contextlib import aclosing
+
 from predictive_agent.config import Settings
 from predictive_agent.llm import LLMClient
 
@@ -76,19 +78,45 @@ injected SDK client remains owned by its caller.
 
 - `text_delta` exposes non-empty text.
 - `tool_call_delta` exposes indexed, possibly incomplete tool-call state.
-- `tool_call_ready` appears once an ID, function name, and JSON-object arguments are complete.
+- `tool_call_ready` appears only after the provider finalizes tool-call generation and the call has
+  an ID, names a submitted function, parses to a JSON object, and contains every top-level
+  `required` property declared by that function.
 - `completed` contains the final `LLMResult`, usage, finish reason, and metrics.
 
-The client only assembles tool calls. Agent code remains responsible for tool execution and for
-appending assistant tool-call and tool-result messages before the next completion.
+`LLMToolCall.executable` means the call passes that same client-level readiness gate. It does not
+mean the complete JSON Schema has been validated: types, formats, nested constraints,
+`additionalProperties`, and business rules remain the tool layer's responsibility. Non-ready final
+calls remain available on `LLMResult.tool_calls` with `readiness_error` and
+`missing_required_arguments` details.
+
+The client only assembles and gates tool calls. Agent code remains responsible for full schema
+validation, tool execution, and appending assistant tool-call and tool-result messages before the
+next completion.
+
+Use `contextlib.aclosing()` when a consumer may stop before the terminal event so the provider
+stream and logical tracing span close immediately:
+
+```python
+async with aclosing(client.stream(messages)) as events:
+    async for event in events:
+        if should_stop(event):
+            break
+```
 
 ## Deadlines, cancellation, and retries
 
 Each logical operation uses one absolute event-loop deadline. Pass a parent deadline created from
 the same loop, or use `client.deadline_after(seconds)`. When omitted, the deadline is operation
 start plus `PA_HTTP_TIMEOUT_S`. It covers connection setup, every request attempt, response
-headers, stream consumption, backoff, and cleanup. Retries never reset it, and an expired deadline
-raises `LLMDeadlineExceeded`.
+headers, provider-chunk waits, backoff, and the logical stream lifetime. Retries never reset it,
+and an expired deadline raises `LLMDeadlineExceeded`.
+
+Streaming installs the timeout only while opening the provider stream or awaiting its next chunk.
+No LLM-owned timeout remains active while consumer code handles a yielded event, so unrelated
+consumer awaits are not cancelled by the LLM client. Wall-clock time still advances against the
+same absolute deadline; if consumer work runs past it, the next provider operation fails before
+reading another chunk. Total duration measures the logical iterator lifetime and therefore includes
+consumer pauses between events; first-event measurements are captured at provider-chunk receipt.
 
 Cancellation propagates as `asyncio.CancelledError`; open streams are closed by their context
 manager. Only connection failures and HTTP 429 responses are retried. `Retry-After` and
@@ -109,6 +137,13 @@ Each request creates an `agent.llm_turn` span through the OpenTelemetry API. Att
 models, provider, timing, usage, attempts, 429 count, and outcome. Prompts, tool results, API keys,
 and authorization data are not recorded. A future tracing milestone may install an SDK/exporter;
 this component does not configure one.
+
+For streaming, the logical span is created with the caller's active span as its parent but is made
+current only around provider-owned awaits. It is not current while an event is yielded, so
+consumer-side spans retain the caller's context instead of becoming accidental children of
+`agent.llm_turn`. Success ends the span before the terminal event is exposed; timeout, error,
+cancellation, and explicit early closure end it once with the corresponding outcome. Early closure
+is recorded as `abandoned`.
 
 These timings include client and network work and must not be described as provider-internal GPU
 prefill or decode measurements.
@@ -138,8 +173,11 @@ never required by ordinary CI. Run it only with `PA_RUN_GROQ_INTEGRATION=1`, a v
 ## Known limits and handoff
 
 - Capability discovery is explicit configuration; the client does not probe provider features.
-- Tool schemas and message histories are passed through to the SDK and remain agent concerns.
+- The readiness gate checks recognition, JSON-object syntax, and top-level required-property
+  presence only; full JSON Schema validation remains a tool-layer concern.
 - There is no automatic recovery after exposed partial stream output.
+- Consumers that stop early must explicitly close the async generator; `aclosing()` is the
+  recommended deterministic pattern.
 - OpenTelemetry export, agent graphs, tool execution, prefetching, and benchmark comparisons belong
   to later milestones.
 - M1.5 timing coefficients remain unchanged. Mock calibration limitations continue to be tracked
