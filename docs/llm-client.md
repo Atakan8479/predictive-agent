@@ -93,6 +93,11 @@ The client only assembles and gates tool calls. Agent code remains responsible f
 validation, tool execution, and appending assistant tool-call and tool-result messages before the
 next completion.
 
+Once the provider stream closes successfully, the client constructs the immutable result, freezes
+the successful metrics, and ends `agent.llm_turn` before yielding any `tool_call_ready` or
+`completed` event. Closing after readiness therefore preserves success; closing while provider I/O
+is still active records `abandoned`.
+
 Use `contextlib.aclosing()` when a consumer may stop before the terminal event so the provider
 stream and logical tracing span close immediately:
 
@@ -115,8 +120,11 @@ Streaming installs the timeout only while opening the provider stream or awaitin
 No LLM-owned timeout remains active while consumer code handles a yielded event, so unrelated
 consumer awaits are not cancelled by the LLM client. Wall-clock time still advances against the
 same absolute deadline; if consumer work runs past it, the next provider operation fails before
-reading another chunk. Total duration measures the logical iterator lifetime and therefore includes
-consumer pauses between events; first-event measurements are captured at provider-chunk receipt.
+reading another chunk. Total duration includes client-observed connection, retry, backoff, provider
+waiting, and stream consumption through provider completion. It is frozen when the provider stream
+closes, so consumer work after a readiness event cannot inflate successful LLM duration. An
+unbuffered stream still cannot remove consumer backpressure before provider completion, and this
+measurement is not provider-internal inference time.
 
 Cancellation propagates as `asyncio.CancelledError`; open streams are closed by their context
 manager. Only connection failures and HTTP 429 responses are retried. `Retry-After` and
@@ -141,9 +149,11 @@ this component does not configure one.
 For streaming, the logical span is created with the caller's active span as its parent but is made
 current only around provider-owned awaits. It is not current while an event is yielded, so
 consumer-side spans retain the caller's context instead of becoming accidental children of
-`agent.llm_turn`. Success ends the span before the terminal event is exposed; timeout, error,
-cancellation, and explicit early closure end it once with the corresponding outcome. Early closure
-is recorded as `abandoned`.
+`agent.llm_turn`. Success ends the span before post-completion readiness or terminal events are
+exposed; timeout, error, cancellation, and explicit early closure end it once with the corresponding
+outcome. Closure before provider completion is recorded as `abandoned`; closure after successful
+provider completion keeps the already-finalized `success` outcome even when terminal events remain
+unread.
 
 These timings include client and network work and must not be described as provider-internal GPU
 prefill or decode measurements.

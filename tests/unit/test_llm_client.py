@@ -185,6 +185,28 @@ class _FirstThenBlockingStream(_FakeStream):
         await asyncio.Event().wait()
 
 
+def _finalized_order_stream() -> _FakeStream:
+    return _FakeStream(
+        [
+            _chunk(
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "call_order",
+                        "type": "function",
+                        "function": {
+                            "name": "get_order",
+                            "arguments": '{"order_id":"ORD-0042"}',
+                        },
+                    }
+                ],
+                finish_reason="tool_calls",
+            ),
+            _chunk(usage=True),
+        ]
+    )
+
+
 class _FakeCompletions:
     def __init__(self, outcomes: list[object | Exception]) -> None:
         self.outcomes = outcomes
@@ -969,20 +991,133 @@ async def test_explicit_early_stream_closure_is_deterministic() -> None:
     assert tracer.span.end_count == 1
 
 
+async def test_consumer_delay_after_tool_ready_does_not_change_final_metrics() -> None:
+    stream = _finalized_order_stream()
+    tracer = _FakeTracer()
+    client, sdk = _client([stream], tracer=tracer)
+    events = client.stream(
+        [{"role": "user", "content": "lookup"}],
+        tools=[_tool("get_order", "order_id")],
+        deadline=asyncio.get_running_loop().time() + 0.05,
+    )
+
+    assert (await anext(events)).type == "tool_call_delta"
+    ready = await anext(events)
+    assert ready.type == "tool_call_ready"
+    assert tracer.span.attributes["llm.outcome"] == "success"
+    assert tracer.span.end_count == 1
+    finalized_duration_ms = tracer.span.attributes["llm.duration_ms"]
+
+    await asyncio.sleep(0.08)
+    completed = await anext(events)
+
+    assert completed.type == "completed"
+    assert completed.result is not None
+    assert completed.result.metrics.total_duration_s == pytest.approx(
+        cast(float, finalized_duration_ms) / 1000
+    )
+    assert tracer.span.attributes["llm.duration_ms"] == finalized_duration_ms
+    assert tracer.span.end_count == 1
+    assert len(sdk.completions.calls) == 1
+    await events.aclose()
+
+
+async def test_close_after_tool_ready_preserves_successful_outcome() -> None:
+    stream = _finalized_order_stream()
+    tracer = _FakeTracer()
+    client, _ = _client([stream], tracer=tracer)
+    events = client.stream(
+        [{"role": "user", "content": "lookup"}],
+        tools=[_tool("get_order", "order_id")],
+    )
+
+    assert (await anext(events)).type == "tool_call_delta"
+    assert (await anext(events)).type == "tool_call_ready"
+    await events.aclose()
+
+    assert stream.closed
+    assert tracer.span.attributes["llm.outcome"] == "success"
+    assert tracer.span.end_count == 1
+
+
+async def test_multiple_ready_events_share_one_finalized_completion() -> None:
+    stream = _FakeStream(
+        [
+            _chunk(
+                tool_calls=[
+                    {
+                        "index": 1,
+                        "id": "call_product",
+                        "type": "function",
+                        "function": {
+                            "name": "get_product",
+                            "arguments": '{"sku":"SKU-0007"}',
+                        },
+                    },
+                    {
+                        "index": 0,
+                        "id": "call_order",
+                        "type": "function",
+                        "function": {
+                            "name": "get_order",
+                            "arguments": '{"order_id":"ORD-0042"}',
+                        },
+                    },
+                ],
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    tracer = _FakeTracer()
+    client, _ = _client([stream], tracer=tracer)
+    events = client.stream(
+        [{"role": "user", "content": "lookup"}],
+        tools=[_tool("get_order", "order_id"), _tool("get_product", "sku")],
+    )
+
+    assert (await anext(events)).type == "tool_call_delta"
+    assert (await anext(events)).type == "tool_call_delta"
+    first_ready = await anext(events)
+    finalized_duration_ms = tracer.span.attributes["llm.duration_ms"]
+    await asyncio.sleep(0.02)
+    second_ready = await anext(events)
+    await asyncio.sleep(0.02)
+    completed = await anext(events)
+
+    ready_calls = [first_ready.tool_call, second_ready.tool_call]
+    assert [call.index for call in ready_calls if call is not None] == [0, 1]
+    assert completed.type == "completed"
+    assert completed.result is not None
+    assert completed.result.metrics.total_duration_s == pytest.approx(
+        cast(float, finalized_duration_ms) / 1000
+    )
+    assert tracer.span.end_count == 1
+    await events.aclose()
+
+
 async def test_real_opentelemetry_context_does_not_leak_across_yields() -> None:
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer("tests.llm")
-    stream = _FakeStream([_chunk(content="first"), _chunk(finish_reason="stop")])
+    stream = _finalized_order_stream()
     client, _ = _client([stream], tracer=tracer)
 
     with tracer.start_as_current_span("agent.parent") as parent:
         parent_id = parent.get_span_context().span_id
-        events = client.stream([{"role": "user", "content": "hello"}])
-        first = await anext(events)
-        assert first.content_delta == "first"
+        events = client.stream(
+            [{"role": "user", "content": "lookup"}],
+            tools=[_tool("get_order", "order_id")],
+        )
+        assert (await anext(events)).type == "tool_call_delta"
+        assert (await anext(events)).type == "tool_call_ready"
         assert trace.get_current_span().get_span_context().span_id == parent_id
+        llm_finished = [
+            span for span in exporter.get_finished_spans() if span.name == "agent.llm_turn"
+        ]
+        assert len(llm_finished) == 1
+        assert llm_finished[0].attributes is not None
+        assert llm_finished[0].attributes["llm.outcome"] == "success"
 
         with tracer.start_as_current_span("consumer.tool"):
             pass

@@ -361,8 +361,9 @@ class LLMClient:
 
         Provider awaits share one absolute deadline, but no timeout or tracing context remains
         active while the consumer handles a yielded event. Retry is allowed only before any text
-        or tool-call delta is yielded. Callers that may stop early should use ``aclosing()`` for
-        deterministic stream cleanup.
+        or tool-call delta is yielded. Successful metrics and tracing are finalized when the
+        provider stream closes, before readiness or completion events are delivered. Callers that
+        may stop early should use ``aclosing()`` for deterministic stream cleanup.
         """
         self._ensure_open()
         loop = asyncio.get_running_loop()
@@ -487,6 +488,7 @@ class LLMClient:
                                 if finish_reason == "tool_calls":
                                     tool_calls_finalized = True
                                     tool_calls_finalized_at = observed
+                    provider_completed_at = loop.time()
                     if first_event is None:
                         raise LLMProtocolError("provider returned an empty stream")
                     final_calls = tuple(
@@ -498,10 +500,9 @@ class LLMClient:
                         ready_at = tool_calls_finalized_at or loop.time()
                         if first_tool_ready is None:
                             first_tool_ready = ready_at - started
-                        for call in ready_calls:
-                            yield LLMStreamEvent("tool_call_ready", tool_call=call)
                     metrics = self._metrics(
                         started,
+                        finished=provider_completed_at,
                         returned_model=returned_model,
                         attempts=attempts,
                         rate_limits=rate_limits,
@@ -521,6 +522,8 @@ class LLMClient:
                     self._finish_span(span, metrics)
                     span.end()
                     span_ended = True
+                    for call in ready_calls:
+                        yield LLMStreamEvent("tool_call_ready", tool_call=call)
                     yield LLMStreamEvent("completed", result=result)
                     return
                 except asyncio.CancelledError:
@@ -771,6 +774,7 @@ class LLMClient:
         self,
         started: float,
         *,
+        finished: float | None = None,
         returned_model: str | None,
         attempts: int,
         rate_limits: int,
@@ -790,7 +794,8 @@ class LLMClient:
             first_text_output_s=first_text,
             first_tool_call_delta_s=first_tool_delta,
             first_tool_call_ready_s=first_tool_ready,
-            total_duration_s=asyncio.get_running_loop().time() - started,
+            total_duration_s=(asyncio.get_running_loop().time() if finished is None else finished)
+            - started,
             attempts=attempts,
             retry_count=attempts - 1,
             rate_limit_count=rate_limits,
