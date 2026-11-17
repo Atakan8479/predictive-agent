@@ -5,8 +5,10 @@ Every component reads configuration from here so that switching LLM provider
 """
 
 from functools import lru_cache
+from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,10 +21,14 @@ class Settings(BaseSettings):
     )
 
     # --- LLM provider (any OpenAI-compatible endpoint) ----------------------
-    llm_base_url: str = "http://localhost:11434/v1"
-    llm_api_key: str = "ollama"  # Ollama ignores it; Groq needs a real key
-    llm_model: str = "qwen3.5:9b-q4_K_M"
+    llm_provider: Literal["ollama", "mock", "groq", "openai-compatible"] = "ollama"
+    llm_base_url: str = Field(default="http://localhost:11434/v1", min_length=1)
+    llm_api_key: str = Field(default="ollama", min_length=1)
+    llm_model: str = Field(default="qwen3.5:9b-q4_K_M", min_length=1)
     llm_think: bool = False  # reasoning mode dominates latency; keep off for the agent
+    llm_max_retries: int = Field(default=2, ge=0)
+    llm_retry_backoff_initial_s: float = Field(default=0.25, gt=0, allow_inf_nan=False)
+    llm_retry_backoff_max_s: float = Field(default=2.0, gt=0, allow_inf_nan=False)
 
     # --- Ollama-specific (used by the doctor and model warm-up) -------------
     ollama_url: str = "http://localhost:11434"
@@ -38,7 +44,18 @@ class Settings(BaseSettings):
     prefetch_enabled: bool = False
 
     # --- Timeouts ----------------------------------------------------------
-    http_timeout_s: float = Field(default=120.0, gt=0)
+    http_timeout_s: float = Field(default=120.0, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_llm_configuration(self) -> "Settings":
+        parsed = urlsplit(self.llm_base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("llm_base_url must be an absolute HTTP(S) URL")
+        if self.llm_retry_backoff_max_s < self.llm_retry_backoff_initial_s:
+            raise ValueError("llm_retry_backoff_max_s must be at least the initial backoff")
+        if self.llm_provider == "groq" and self.llm_api_key in {"ollama", "mock"}:
+            raise ValueError("Groq requires a provider API key")
+        return self
 
 
 @lru_cache
