@@ -104,6 +104,13 @@ client. Broader controlled-text timing validation remains partially complete and
 [Issue #17](https://github.com/Atakan8479/predictive-agent/issues/17) for execution after the
 representative synchronous agent path exists and before final comparative benchmark claims.
 
+## Asynchronous LLM client
+
+The shared client uses the official asynchronous OpenAI SDK for Ollama, the Compose mock LLM,
+Groq, and other OpenAI-compatible endpoints. Provider switching, absolute deadline behavior,
+bounded retries, streaming/tool-call events, measurements, lifecycle ownership, examples, and
+opt-in integration commands are documented in [the LLM client guide](docs/llm-client.md).
+
 ## Environment check and LLM baseline
 
 ```bash
