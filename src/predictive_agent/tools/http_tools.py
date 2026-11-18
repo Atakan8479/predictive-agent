@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Mapping
-from typing import Any
+from datetime import date
+from typing import Any, Literal
 from urllib.parse import quote
 
 import httpx
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from predictive_agent.config import Settings
 from predictive_agent.tools.definitions import build_tool_registry
@@ -45,37 +45,49 @@ class ToolResponseError(ToolHTTPError):
     """The external API response was not valid JSON in the expected shape."""
 
 
+class ToolHTTPTimeoutError(ToolHTTPError, TimeoutError):
+    """HTTPX timed out independently before the absolute registry deadline."""
+
+
+class ToolClientClosedError(ToolHTTPError, RuntimeError):
+    """Execution was attempted through a closed HTTP tool client."""
+
+
+class ToolBindingError(ToolHTTPError, ValueError):
+    """A registered tool has no supported HTTP binding."""
+
+
 class _ResponseModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class OrderItem(_ResponseModel):
-    sku: str
-    quantity: int
-    unit_price: float
+    sku: str = Field(pattern=r"^SKU-\d{4}$")
+    quantity: int = Field(ge=1)
+    unit_price: float = Field(ge=0, allow_inf_nan=False)
 
 
 class OrderResult(_ResponseModel):
-    order_id: str
-    customer_id: str
+    order_id: str = Field(pattern=r"^ORD-\d{4}$")
+    customer_id: str = Field(pattern=r"^CUST-\d{3}$")
     status: str
-    ordered_at: str
+    ordered_at: date
     currency: str
-    total: float
+    total: float = Field(ge=0, allow_inf_nan=False)
     items: list[OrderItem]
 
 
 class ShipmentResult(_ResponseModel):
-    shipment_id: str
-    order_id: str
+    shipment_id: str = Field(pattern=r"^SHP-\d{4}$")
+    order_id: str = Field(pattern=r"^ORD-\d{4}$")
     carrier: str
     tracking_number: str
     status: str
-    estimated_delivery: str
+    estimated_delivery: date
 
 
 class CustomerResult(_ResponseModel):
-    customer_id: str
+    customer_id: str = Field(pattern=r"^CUST-\d{3}$")
     name: str
     email: str
     tier: str
@@ -83,18 +95,18 @@ class CustomerResult(_ResponseModel):
 
 
 class PolicyResult(_ResponseModel):
-    policy_name: str
+    policy_name: Literal["returns", "shipping", "cancellations"]
     version: str
     description: str
     rules: list[str]
 
 
 class InventoryResult(_ResponseModel):
-    sku: str
+    sku: str = Field(pattern=r"^SKU-\d{4}$")
     name: str
-    available: int
+    available: int = Field(ge=0)
     warehouse: str
-    unit_price: float
+    unit_price: float = Field(ge=0, allow_inf_nan=False)
 
 
 _ENDPOINTS: dict[str, tuple[str, str]] = {
@@ -124,13 +136,16 @@ class HTTPToolClient:
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.settings = settings
+        base_registry = registry or build_tool_registry()
+        unsupported = set(base_registry.names()).difference(_ENDPOINTS)
+        if unsupported:
+            raise ToolBindingError(f"no HTTP binding for registered tools: {sorted(unsupported)!r}")
         self._owns_client = http_client is None
         self._client = http_client or httpx.AsyncClient(
             base_url=settings.tool_api_base_url,
             follow_redirects=False,
             timeout=settings.http_timeout_s,
         )
-        base_registry = registry or build_tool_registry()
         executors: dict[str, ToolExecutor] = {
             name: self._executor_for(name) for name in base_registry.names()
         }
@@ -174,14 +189,14 @@ class HTTPToolClient:
         context: ExecutionContext | None,
         deadline: float,
     ) -> dict[str, Any]:
-        if self._closed:
-            raise RuntimeError("HTTP tool client is closed")
+        self._ensure_open()
         return await self.registry.execute(name, arguments, context=context, deadline=deadline)
 
     def _executor_for(self, name: str) -> ToolExecutor:
         async def execute(
             arguments: BaseModel, context: ExecutionContext, deadline: float
         ) -> dict[str, Any]:
+            self._ensure_open()
             del context  # Authorization is completed by ToolRegistry before this boundary.
             return await self._request(name, arguments, deadline)
 
@@ -196,12 +211,9 @@ class HTTPToolClient:
         value = getattr(arguments, argument_name)
         path = template.format(value=quote(value, safe=""))
         try:
-            async with asyncio.timeout_at(deadline):
-                response = await self._client.get(path, timeout=remaining, follow_redirects=False)
-        except TimeoutError as error:
-            raise ToolDeadlineExceeded(f"deadline expired while executing {name!r}") from error
+            response = await self._client.get(path, timeout=remaining, follow_redirects=False)
         except httpx.TimeoutException as error:
-            raise ToolDeadlineExceeded(f"HTTP timeout while executing {name!r}") from error
+            raise ToolHTTPTimeoutError(f"HTTP timeout while executing {name!r}") from error
         except httpx.RequestError as error:
             raise ToolConnectionError("external tool API connection failed") from error
 
@@ -210,13 +222,15 @@ class HTTPToolClient:
         if response.status_code != 200:
             raise ToolHTTPStatusError(response.status_code)
         try:
-            payload = response.json()
-        except json.JSONDecodeError as error:
-            raise ToolResponseError("external tool API returned invalid JSON") from error
-        try:
-            result = _RESULT_MODELS[name].model_validate(payload)
+            result = _RESULT_MODELS[name].model_validate_json(response.content, strict=True)
         except ValidationError as error:
-            raise ToolResponseError("external tool API returned an unexpected response") from error
+            raise ToolResponseError(
+                "external tool API returned invalid JSON or response data"
+            ) from error
         if getattr(result, argument_name) != value:
             raise ToolResponseError("external tool API returned a mismatched resource")
         return result.model_dump(mode="json")
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise ToolClientClosedError("HTTP tool client is closed")

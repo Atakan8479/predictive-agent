@@ -230,8 +230,38 @@ async def test_multiple_tools_selects_the_scenario_named_by_user(client: httpx.A
     assert call["function"]["name"] == "get_shipment"
 
 
-async def test_inventory_aliases_fail_closed_when_both_are_advertised(
-    client: httpx.AsyncClient,
+@pytest.mark.parametrize("tool_choice", [None, "auto"])
+async def test_inventory_aliases_fail_closed_for_automatic_selection(
+    client: httpx.AsyncClient, tool_choice: str | None
+) -> None:
+    request: dict[str, Any] = {
+        "model": "mock-calibrated",
+        "messages": [{"role": "user", "content": "Check inventory for SKU-0007"}],
+        "tools": [_tool("get_product"), _tool("get_inventory")],
+    }
+    if tool_choice is not None:
+        request["tool_choice"] = tool_choice
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json=request,
+    )
+
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert "conflicting inventory aliases" in choice["message"]["content"]
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_product"}},
+        {"type": "function", "function": {"name": "get_inventory"}},
+    ],
+)
+async def test_inventory_aliases_fail_closed_for_forced_selection(
+    client: httpx.AsyncClient, tool_choice: str | dict[str, Any]
 ) -> None:
     response = await client.post(
         "/v1/chat/completions",
@@ -240,12 +270,32 @@ async def test_inventory_aliases_fail_closed_when_both_are_advertised(
             "model": "mock-calibrated",
             "messages": [{"role": "user", "content": "Check inventory for SKU-0007"}],
             "tools": [_tool("get_product"), _tool("get_inventory")],
+            "tool_choice": tool_choice,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "conflicting inventory aliases" in response.json()["detail"]
+
+
+async def test_inventory_alias_conflict_precedes_schema_validation_and_other_tools(
+    client: httpx.AsyncClient,
+) -> None:
+    invalid_inventory = _tool("get_inventory")
+    invalid_inventory["function"]["parameters"] = {"type": "array"}
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Show order ORD-0042"}],
+            "tools": [_tool("get_order"), _tool("get_product"), invalid_inventory],
         },
     )
 
     choice = response.json()["choices"][0]
     assert choice["finish_reason"] == "stop"
-    assert "ambiguous" in choice["message"]["content"]
+    assert "conflicting inventory aliases" in choice["message"]["content"]
 
 
 async def test_named_tool_choice_is_respected(client: httpx.AsyncClient) -> None:

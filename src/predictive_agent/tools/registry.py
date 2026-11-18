@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import Any, cast
 
 from langchain_core.tools import BaseTool, StructuredTool
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator
 
 _TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _AUTH_SCOPE = re.compile(r"^[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*$")
@@ -62,7 +62,7 @@ class CostClass(StrEnum):
 class ToolDependency(BaseModel):
     """Data another tool can provide; it does not mandate execution order."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     tool_name: str = Field(pattern=_TOOL_NAME.pattern)
     provides_arguments: tuple[str, ...] = Field(min_length=1)
@@ -78,14 +78,19 @@ class ToolDependency(BaseModel):
 class ToolSpec(BaseModel):
     """Immutable authoritative contract and safety metadata for one tool."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        strict=True,
+        arbitrary_types_allowed=True,
+    )
 
     name: str = Field(pattern=_TOOL_NAME.pattern)
     description: str = Field(min_length=1, max_length=512)
     args_model: type[BaseModel]
-    read_only: bool
-    idempotent: bool
-    freshness_ttl_s: float = Field(ge=0, allow_inf_nan=False)
+    read_only: StrictBool
+    idempotent: StrictBool
+    freshness_ttl_s: float = Field(ge=0, allow_inf_nan=False, strict=True)
     auth_scope: str = Field(pattern=_AUTH_SCOPE.pattern)
     depends_on: tuple[ToolDependency, ...] = ()
     cost_class: CostClass
@@ -101,7 +106,12 @@ class ToolSpec(BaseModel):
     @classmethod
     def validate_args_model(cls, value: type[BaseModel]) -> type[BaseModel]:
         schema = value.model_json_schema()
-        if schema.get("type") != "object" or schema.get("additionalProperties") is not False:
+        if (
+            schema.get("type") != "object"
+            or schema.get("additionalProperties") is not False
+            or value.model_config.get("extra") != "forbid"
+            or value.model_config.get("strict") is not True
+        ):
             raise ValueError("args_model must be a strict object model with extra='forbid'")
         return value
 
@@ -119,13 +129,25 @@ class ToolSpec(BaseModel):
         return self.read_only and self.idempotent
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ExecutionContext:
     """Trusted application context; never sourced from model tool arguments."""
 
     granted_scopes: frozenset[str]
     subject: str | None = None
     tenant_id: str | None = None
+
+    def __init__(
+        self,
+        granted_scopes: Iterable[str],
+        subject: str | None = None,
+        tenant_id: str | None = None,
+    ) -> None:
+        if isinstance(granted_scopes, str):
+            raise TypeError("granted_scopes must be an iterable of complete scope strings")
+        object.__setattr__(self, "granted_scopes", frozenset(granted_scopes))
+        object.__setattr__(self, "subject", subject)
+        object.__setattr__(self, "tenant_id", tenant_id)
 
 
 ToolExecutor = Callable[[BaseModel, ExecutionContext, float], Awaitable[dict[str, Any]]]
@@ -141,7 +163,8 @@ class ToolRegistry:
         executors: Mapping[str, ToolExecutor] | None = None,
     ) -> None:
         registered: dict[str, ToolSpec] = {}
-        for spec in specs:
+        for supplied_spec in specs:
+            spec = ToolSpec.model_validate(supplied_spec.model_dump(round_trip=True))
             if spec.name in registered:
                 raise DuplicateToolError(f"tool {spec.name!r} is already registered")
             registered[spec.name] = spec
@@ -242,7 +265,17 @@ class ToolRegistry:
         executor = self._executors.get(name)
         if executor is None:
             raise ToolNotBoundError(f"tool {name!r} has no execution implementation")
-        return await executor(validated, context, deadline)
+        timeout = asyncio.timeout_at(deadline)
+        try:
+            async with timeout:
+                result = await executor(validated, context, deadline)
+        except TimeoutError as error:
+            if timeout.expired() or asyncio.get_running_loop().time() >= deadline:
+                raise ToolDeadlineExceeded(f"deadline expired while executing {name!r}") from error
+            raise
+        if asyncio.get_running_loop().time() >= deadline:
+            raise ToolDeadlineExceeded(f"deadline expired while executing {name!r}")
+        return result
 
     def langgraph_bindings(
         self,
@@ -312,13 +345,51 @@ def _sorted_json_object(value: dict[str, Any]) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(encoded))
 
 
-def _without_schema_titles(value: Any) -> Any:
-    """Remove descriptive Pydantic titles unsupported by the strict mock schema subset."""
-    if isinstance(value, dict):
-        mapping = cast(dict[str, Any], value)
-        return {
-            key: _without_schema_titles(item) for key, item in mapping.items() if key != "title"
-        }
-    if isinstance(value, list):
-        return [_without_schema_titles(item) for item in cast(list[Any], value)]
-    return value
+_SCHEMA_MAP_KEYWORDS = frozenset(
+    {"$defs", "definitions", "dependentSchemas", "patternProperties", "properties"}
+)
+_SCHEMA_LIST_KEYWORDS = frozenset({"allOf", "anyOf", "oneOf", "prefixItems"})
+_SCHEMA_VALUE_KEYWORDS = frozenset(
+    {
+        "additionalProperties",
+        "contains",
+        "contentSchema",
+        "else",
+        "if",
+        "items",
+        "not",
+        "propertyNames",
+        "then",
+        "unevaluatedItems",
+        "unevaluatedProperties",
+    }
+)
+
+
+def _without_schema_titles(schema: dict[str, Any]) -> dict[str, Any]:
+    """Remove schema annotation titles without traversing data-valued keywords."""
+    projected: dict[str, Any] = {}
+    for keyword, value in schema.items():
+        if keyword == "title":
+            continue
+        if keyword in _SCHEMA_MAP_KEYWORDS and isinstance(value, dict):
+            mapping = cast(dict[str, Any], value)
+            projected[keyword] = {
+                name: _without_schema_titles(cast(dict[str, Any], child))
+                if isinstance(child, dict)
+                else child
+                for name, child in mapping.items()
+            }
+        elif keyword in _SCHEMA_LIST_KEYWORDS and isinstance(value, list):
+            items = cast(list[Any], value)
+            projected[keyword] = [
+                _without_schema_titles(cast(dict[str, Any], item))
+                if isinstance(item, dict)
+                else item
+                for item in items
+            ]
+        elif keyword in _SCHEMA_VALUE_KEYWORDS and isinstance(value, dict):
+            projected[keyword] = _without_schema_titles(cast(dict[str, Any], value))
+        else:
+            projected[keyword] = value
+    return projected

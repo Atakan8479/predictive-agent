@@ -21,7 +21,7 @@ perform network I/O.
 | Tool | Arguments | Scope | TTL | Cost | Dependency |
 |---|---|---|---:|---|---|
 | `get_order` | `order_id: ^ORD-\\d{4}$` | `orders:read` | 30 s | medium | — |
-| `get_shipment` | `order_id: ^ORD-\\d{4}$` | `shipments:read` | 15 s | medium | `get_order` may provide `order_id` |
+| `get_shipment` | `order_id: ^ORD-\\d{4}$` | `shipments:read` | 10 s | medium | `get_order` may provide `order_id` |
 | `get_customer` | `customer_id: ^CUST-\\d{3}$` | `customers:read` | 300 s | low | — |
 | `get_policy` | `returns`, `shipping`, or `cancellations` | `policies:read` | 3600 s | low | — |
 | `get_inventory` | `sku: ^SKU-\\d{4}$` | `inventory:read` | 10 s | medium | — |
@@ -48,7 +48,9 @@ descriptions come only from `ToolSpec`; required fields, patterns, enums, and
 
 The LLM-facing compatibility projection removes only Pydantic's descriptive `title` annotations,
 which the strict Mock LLM schema subset does not support. It does not remove validation constraints;
-the complete Pydantic model remains the authoritative runtime contract.
+the complete Pydantic model remains the authoritative runtime contract. The projection is
+schema-aware: property and definition names called `title`, plus `default`, `enum`, `const`, and
+other data-valued keywords, remain unchanged.
 
 `langgraph_bindings(context=..., deadline=...)` returns async LangChain `BaseTool`/
 `StructuredTool` instances derived from those same specs. Trusted context and the absolute deadline
@@ -71,6 +73,9 @@ Missing context or scope fails before HTTP I/O. The scopes above are synthetic M
 the future M1.9 JWT claim contract. A generic `customers:read` scope does not prove resource-level
 access in a real multi-tenant deployment.
 
+`ExecutionContext` copies granted scopes into an immutable `frozenset`, so later mutation of a
+caller-owned collection cannot change an authorization decision.
+
 Shipment dependency metadata says `get_order` can provide `order_id`. The registry exposes missing
 dependency input inspection but never performs dependency resolution, chaining, or scheduling. If
 an authorized valid order ID is already known, shipment execution does not force an order lookup.
@@ -84,9 +89,15 @@ distinguish registry lookup, argument validation, authorization, deadline expiry
 404, other HTTP status, invalid JSON, and unexpected response shape; cancellation propagates.
 
 One `httpx.AsyncClient` is reused for connection pooling. `async with` or `close()` releases an
-internally created client, while an injected client remains caller-owned. A parent monotonic
-deadline from `asyncio.get_running_loop().time()` is enforced with `asyncio.timeout_at()` and bounds
-the HTTP timeout; it is never refreshed. This component adds no artificial delay.
+internally created client, while an injected client remains caller-owned. The lifecycle guard is
+inside every bound executor, so direct calls, retained registry references, and previously created
+LangGraph bindings all fail consistently after closure without issuing HTTP requests.
+
+A parent monotonic deadline from `asyncio.get_running_loop().time()` is enforced by the registry
+with `asyncio.timeout_at()` and also bounds the HTTP request timeout; it is never refreshed.
+Synchronous response decoding and validation are checked against the deadline before a successful
+result is returned, but this is not a hard real-time preemption guarantee for synchronous Python
+code. This component adds no artificial delay.
 
 `PA_TOOL_API_BASE_URL` defaults to `http://localhost:18100`, the Toxiproxy route for representative
 latency tests. Set `http://localhost:8080` explicitly only for direct correctness or infrastructure
@@ -119,9 +130,11 @@ proxied routes and a bounded registry-schema → Mock LLM → validation/auth �
 
 For M1.8, create one request deadline and one trusted `ExecutionContext`, pass
 `TOOL_REGISTRY.openai_schemas()` to `LLMClient`, fully validate returned calls through the registry,
-reuse one lifespan-owned `HTTPToolClient`, and build the synchronous graph from
-`client.registry.langgraph_bindings(...)`. `LLMToolCall.executable` remains only an LLM-client
-readiness check, and the deadline must not be reset between LLM and tool operations.
+reuse one lifespan-owned `HTTPToolClient`, and build the graph from
+`client.registry.langgraph_bindings(...)` with request-specific trusted context and the original
+deadline. Execute the graph asynchronously because the bindings are async-only.
+`LLMToolCall.executable` remains only an LLM-client readiness check; the deadline must not be reset
+between LLM and tool operations, and bindings must never be reused after their HTTP client closes.
 
 Caching, speculative execution, automatic dependencies, the agent graph, JWT validation, and
 resource-level tenant authorization remain outside M1.7.

@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -40,7 +40,7 @@ def _spec(
         args_model=GetOrderArgs,
         read_only=read_only,
         idempotent=idempotent,
-        freshness_ttl_s=0,
+        freshness_ttl_s=0.0,
         auth_scope="test:read",
         depends_on=depends_on,
         cost_class=CostClass.LOW,
@@ -57,6 +57,25 @@ def test_authoritative_registry_contains_exactly_five_tools_deterministically() 
     )
     assert TOOL_REGISTRY.names() == build_tool_registry().names()
     assert all(spec.read_only and spec.idempotent for spec in TOOL_REGISTRY.specs())
+
+
+def test_registered_metadata_matches_documented_policy() -> None:
+    actual = {
+        spec.name: (
+            spec.freshness_ttl_s,
+            spec.auth_scope,
+            spec.cost_class,
+            tuple(dependency.tool_name for dependency in spec.depends_on),
+        )
+        for spec in TOOL_REGISTRY.specs()
+    }
+    assert actual == {
+        "get_order": (30.0, "orders:read", CostClass.MEDIUM, ()),
+        "get_shipment": (10.0, "shipments:read", CostClass.MEDIUM, ("get_order",)),
+        "get_customer": (300.0, "customers:read", CostClass.LOW, ()),
+        "get_policy": (3600.0, "policies:read", CostClass.LOW, ()),
+        "get_inventory": (10.0, "inventory:read", CostClass.MEDIUM, ()),
+    }
 
 
 def test_duplicate_and_unknown_tools_are_explicit() -> None:
@@ -84,6 +103,36 @@ def test_specs_are_frozen_and_invalid_metadata_is_rejected() -> None:
             auth_scope="bad scope",
             cost_class=CostClass.LOW,
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("read_only", 1), ("idempotent", 0), ("freshness_ttl_s", "1")],
+)
+def test_safety_metadata_rejects_permissive_coercion(field: str, value: object) -> None:
+    data = _spec("lookup").model_dump()
+    data[field] = value
+    with pytest.raises(ValidationError):
+        ToolSpec.model_validate(data)
+
+
+def test_argument_models_must_enable_strict_validation_and_forbid_extras() -> None:
+    class PermissiveArgs(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        order_id: str
+
+    with pytest.raises(ValidationError, match="strict object model"):
+        ToolRegistry((_spec("lookup").model_copy(update={"args_model": PermissiveArgs}),))
+
+
+def test_execution_context_copies_mutable_scope_inputs() -> None:
+    supplied = {"test:read"}
+    context = ExecutionContext(supplied)
+    supplied.clear()
+    assert context.granted_scopes == frozenset({"test:read"})
+    assert isinstance(context.granted_scopes, frozenset)
+    with pytest.raises(TypeError, match="iterable"):
+        ExecutionContext("test:read")
 
 
 @pytest.mark.parametrize(
@@ -188,7 +237,7 @@ def test_canonical_arguments_are_sorted_unicode_preserving_and_validated() -> No
                 args_model=NestedArgs,
                 read_only=True,
                 idempotent=True,
-                freshness_ttl_s=0,
+                freshness_ttl_s=0.0,
                 auth_scope="test:read",
                 cost_class=CostClass.LOW,
             ),
@@ -229,6 +278,29 @@ def test_openai_schemas_derive_from_runtime_contracts_and_are_deterministic() ->
         json.dumps(schema, allow_nan=False)
     inventory = next(item for item in schemas if item["function"]["name"] == "get_inventory")
     assert inventory["function"]["parameters"]["properties"]["sku"]["pattern"] == r"^SKU-\d{4}$"
+
+
+def test_schema_projection_preserves_title_properties_definitions_and_data() -> None:
+    class TitleDefinition(BaseModel):
+        model_config = ConfigDict(extra="forbid", strict=True)
+        title: str
+
+    class SchemaArgs(BaseModel):
+        model_config = ConfigDict(extra="forbid", strict=True)
+        title: str
+        nested: TitleDefinition
+        metadata: dict[str, str] = {"title": "preserved"}
+        mode: Literal["safe"] = "safe"
+
+    registry = ToolRegistry((_spec("schema").model_copy(update={"args_model": SchemaArgs}),))
+    parameters = registry.openai_schemas()[0]["function"]["parameters"]
+    assert "title" in parameters["properties"]
+    assert parameters["properties"]["nested"] == {"$ref": "#/$defs/TitleDefinition"}
+    assert "TitleDefinition" in parameters["$defs"]
+    assert "title" in parameters["$defs"]["TitleDefinition"]["properties"]
+    assert parameters["properties"]["metadata"]["default"] == {"title": "preserved"}
+    assert parameters["properties"]["mode"]["const"] == "safe"
+    assert parameters["required"] == ["title", "nested"]
 
 
 async def test_execution_enforces_validation_auth_binding_and_deadline() -> None:
@@ -279,6 +351,84 @@ async def test_execution_enforces_validation_auth_binding_and_deadline() -> None
             context=ExecutionContext(frozenset({"test:read"})),
             deadline=deadline,
         )
+
+
+@pytest.mark.parametrize("deadline", [float("nan"), float("inf"), float("-inf")])
+async def test_non_finite_deadlines_fail_before_executor(deadline: float) -> None:
+    called = False
+
+    async def executor(
+        arguments: BaseModel, context: ExecutionContext, absolute_deadline: float
+    ) -> dict[str, Any]:
+        nonlocal called
+        called = True
+        return {}
+
+    registry = ToolRegistry((_spec("lookup"),)).with_executors({"lookup": executor})
+    with pytest.raises(ToolDeadlineExceeded):
+        await registry.execute(
+            "lookup",
+            {"order_id": "ORD-0042"},
+            context=ExecutionContext({"test:read"}),
+            deadline=deadline,
+        )
+    assert not called
+
+
+async def test_registry_enforces_in_flight_deadline_for_generic_executor() -> None:
+    started = asyncio.Event()
+
+    async def executor(
+        arguments: BaseModel, context: ExecutionContext, deadline: float
+    ) -> dict[str, Any]:
+        started.set()
+        await asyncio.Event().wait()
+        return {"late": True}
+
+    registry = ToolRegistry((_spec("lookup"),)).with_executors({"lookup": executor})
+    with pytest.raises(ToolDeadlineExceeded):
+        await registry.execute(
+            "lookup",
+            {"order_id": "ORD-0042"},
+            context=ExecutionContext({"test:read"}),
+            deadline=asyncio.get_running_loop().time() + 0.02,
+        )
+    assert started.is_set()
+
+
+async def test_registry_rejects_result_from_non_preemptible_executor_after_deadline() -> None:
+    async def executor(
+        arguments: BaseModel, context: ExecutionContext, deadline: float
+    ) -> dict[str, Any]:
+        while asyncio.get_running_loop().time() <= deadline:
+            pass
+        return {"late": True}
+
+    registry = ToolRegistry((_spec("lookup"),)).with_executors({"lookup": executor})
+    with pytest.raises(ToolDeadlineExceeded):
+        await registry.execute(
+            "lookup",
+            {"order_id": "ORD-0042"},
+            context=ExecutionContext({"test:read"}),
+            deadline=asyncio.get_running_loop().time() + 0.01,
+        )
+
+
+async def test_executor_originated_timeout_is_not_reclassified() -> None:
+    async def executor(
+        arguments: BaseModel, context: ExecutionContext, deadline: float
+    ) -> dict[str, Any]:
+        raise TimeoutError("executor timeout")
+
+    registry = ToolRegistry((_spec("lookup"),)).with_executors({"lookup": executor})
+    with pytest.raises(TimeoutError, match="executor timeout") as caught:
+        await registry.execute(
+            "lookup",
+            {"order_id": "ORD-0042"},
+            context=ExecutionContext({"test:read"}),
+            deadline=asyncio.get_running_loop().time() + 1,
+        )
+    assert type(caught.value) is TimeoutError
 
 
 async def test_langgraph_bindings_preserve_contract_and_guarded_execution() -> None:

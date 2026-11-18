@@ -82,7 +82,9 @@ command and bounded concurrency controls. Its read timeout is intentionally long
 
 The mock LLM supports regular and SSE `POST /v1/chat/completions` responses, deterministic
 schema-valid calls for `get_order`, `get_shipment`, `get_customer`, `get_policy`, and `get_product`,
-and conversation-aware final answers after matched tool results. Automatic calls require matching
+plus the canonical `get_inventory` compatibility name, and conversation-aware final answers after
+matched tool results. The public registry still exposes exactly five tools and excludes historical
+`get_product`. Automatic calls require matching
 current-turn intent as well as safe arguments; incidental identifiers cannot select unrelated tools.
 Missing or ambiguous identifiers, unsupported tools, and unsatisfied explicit choices fail
 deterministically. `max_tokens` and

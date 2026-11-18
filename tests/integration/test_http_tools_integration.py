@@ -52,7 +52,41 @@ async def test_all_tools_use_the_configured_proxied_endpoint(
     assert result[identity_field] == expected
 
 
-async def test_registry_schema_mock_llm_and_http_execution_contract() -> None:
+@pytest.mark.parametrize(
+    ("expected_name", "prompt", "scope", "identity_field", "identity"),
+    [
+        ("get_order", "Show order ORD-0042", "orders:read", "order_id", "ORD-0042"),
+        (
+            "get_shipment",
+            "Track shipment ORD-0042",
+            "shipments:read",
+            "order_id",
+            "ORD-0042",
+        ),
+        (
+            "get_customer",
+            "Show customer CUST-073",
+            "customers:read",
+            "customer_id",
+            "CUST-073",
+        ),
+        ("get_policy", "Explain the returns policy", "policies:read", "policy_name", "returns"),
+        (
+            "get_inventory",
+            "Check inventory for SKU-0007",
+            "inventory:read",
+            "sku",
+            "SKU-0007",
+        ),
+    ],
+)
+async def test_registry_schemas_mock_llm_and_http_execution_contract(
+    expected_name: str,
+    prompt: str,
+    scope: str,
+    identity_field: str,
+    identity: str,
+) -> None:
     llm_port = os.getenv("PA_MOCK_LLM_PORT", "8090")
     proxy_port = os.getenv("PA_TOXIPROXY_MOCK_APIS_PORT", "18100")
     settings = _settings(
@@ -66,15 +100,16 @@ async def test_registry_schema_mock_llm_and_http_execution_contract() -> None:
     tools = cast(list[ChatCompletionToolUnionParam], list(TOOL_REGISTRY.openai_schemas()))
     messages = cast(
         list[ChatCompletionMessageParam],
-        [{"role": "user", "content": "Check inventory for SKU-0007"}],
+        [{"role": "user", "content": prompt}],
     )
-    context = ExecutionContext(frozenset({"inventory:read"}), subject="fixture-user")
+    context = ExecutionContext({scope}, subject="fixture-user")
     deadline = asyncio.get_running_loop().time() + 15
     async with LLMClient(settings) as llm, HTTPToolClient(settings) as tool_client:
         result = await llm.complete(messages, tools=tools, deadline=deadline)
         call = result.tool_calls[0]
         assert call.executable
-        assert call.name == "get_inventory"
+        assert call.name == expected_name
+        assert call.name is not None
         assert call.parsed_arguments is not None
         payload = await tool_client.execute(
             call.name,
@@ -82,4 +117,4 @@ async def test_registry_schema_mock_llm_and_http_execution_contract() -> None:
             context=context,
             deadline=deadline,
         )
-    assert payload["sku"] == "SKU-0007"
+    assert payload[identity_field] == identity
