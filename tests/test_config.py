@@ -10,6 +10,7 @@ def test_defaults_target_local_ollama_with_prefetch_off() -> None:
     assert s.llm_provider == "ollama"
     assert s.llm_base_url == "http://localhost:11434/v1"
     assert s.llm_think is False
+    assert s.tool_api_base_url == "http://localhost:18100"
     assert s.mock_llm_base_latency_ms == pytest.approx(77.282)
     assert s.mock_llm_prefill_tps == pytest.approx(3089.067)
     assert s.mock_llm_decode_tps == pytest.approx(64.340)
@@ -74,6 +75,9 @@ def test_invalid_mock_llm_timing_is_rejected(
         ("PA_LLM_RETRY_BACKOFF_INITIAL_S", "0"),
         ("PA_LLM_RETRY_BACKOFF_MAX_S", "nan"),
         ("PA_HTTP_TIMEOUT_S", "inf"),
+        ("PA_TOOL_API_BASE_URL", "localhost:18100"),
+        ("PA_TOOL_API_BASE_URL", "ftp://localhost"),
+        ("PA_TOOL_API_BASE_URL", "http://localhost:18100/path"),
     ],
 )
 def test_invalid_llm_client_configuration_is_rejected(

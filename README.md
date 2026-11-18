@@ -111,6 +111,12 @@ Groq, and other OpenAI-compatible endpoints. Provider switching, absolute deadli
 bounded retries, streaming/tool-call events, measurements, lifecycle ownership, examples, and
 opt-in integration commands are documented in [the LLM client guide](docs/llm-client.md).
 
+## Tool registry
+
+The authoritative five-tool contracts, strict argument validation, deterministic schemas,
+authorization/deadline gates, and pooled asynchronous HTTP execution are documented in
+[the tool registry guide](docs/tool-registry.md).
+
 ## Environment check and LLM baseline
 
 ```bash

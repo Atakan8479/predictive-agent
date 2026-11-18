@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     mock_llm_prefill_tps: float = Field(default=3089.067, gt=0, allow_inf_nan=False)
     mock_llm_decode_tps: float = Field(default=64.340, gt=0, allow_inf_nan=False)
 
+    # --- External tool APIs ------------------------------------------------
+    tool_api_base_url: str = Field(default="http://localhost:18100", min_length=1)
+
     # --- Feature flags -----------------------------------------------------
     prefetch_enabled: bool = False
 
@@ -55,6 +58,15 @@ class Settings(BaseSettings):
             raise ValueError("llm_retry_backoff_max_s must be at least the initial backoff")
         if self.llm_provider == "groq" and self.llm_api_key in {"ollama", "mock"}:
             raise ValueError("Groq requires a provider API key")
+        tool_api_url = urlsplit(self.tool_api_base_url)
+        if (
+            tool_api_url.scheme not in {"http", "https"}
+            or not tool_api_url.netloc
+            or tool_api_url.path not in {"", "/"}
+            or tool_api_url.query
+            or tool_api_url.fragment
+        ):
+            raise ValueError("tool_api_base_url must be an HTTP(S) origin without a path")
         return self
 
 

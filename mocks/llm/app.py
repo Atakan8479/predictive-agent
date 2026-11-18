@@ -42,7 +42,13 @@ SUPPORTED_TOOLS: dict[str, ToolSpec] = {
         re.compile(r"\b(?:returns|cancellations|shipping)\b", re.IGNORECASE),
         ("policy", "return", "cancel", "shipping"),
     ),
+    # get_product is the frozen M1.5 name; get_inventory is the canonical M1.7 contract.
     "get_product": (
+        "sku",
+        re.compile(r"\bSKU-\d{4}\b", re.IGNORECASE),
+        ("product", "inventory", "sku"),
+    ),
+    "get_inventory": (
         "sku",
         re.compile(r"\bSKU-\d{4}\b", re.IGNORECASE),
         ("product", "inventory", "sku"),
