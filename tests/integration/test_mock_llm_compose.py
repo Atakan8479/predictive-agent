@@ -223,6 +223,31 @@ async def test_mock_llm_multi_turn_request_ignores_historical_tool_result() -> N
     assert json.loads(call["function"]["arguments"]) == {"sku": "SKU-0007"}
 
 
+@pytest.mark.skipif(
+    os.getenv("PA_RUN_INTEGRATION") != "1",
+    reason="set PA_RUN_INTEGRATION=1 with the Compose stack running",
+)
+async def test_mock_llm_service_rejects_inventory_alias_ambiguity() -> None:
+    port = os.getenv("PA_MOCK_LLM_PORT", "8090")
+    async with httpx.AsyncClient(
+        base_url=f"http://127.0.0.1:{port}", timeout=httpx.Timeout(5.0, connect=2.0)
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers=FAST_HEADERS,
+            json={
+                "model": "mock-calibrated",
+                "messages": [{"role": "user", "content": "Check inventory for SKU-0007"}],
+                "tools": [_tool("get_product", "sku"), _tool("get_inventory", "sku")],
+            },
+        )
+
+    response.raise_for_status()
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert "conflicting inventory aliases" in choice["message"]["content"]
+
+
 async def _measure_stream(
     client: httpx.AsyncClient, prompt: str, headers: dict[str, str] | None = None
 ) -> tuple[float, float, dict[str, int]]:

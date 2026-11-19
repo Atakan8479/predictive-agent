@@ -36,3 +36,63 @@ jobs:
 
       - name: Test
         run: uv run pytest -m "not integration"
+
+  compose-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Build and start Compose services
+        run: docker compose up -d --build --wait --wait-timeout 180
+
+      - name: Show service health
+        run: |
+          docker compose ps
+          docker compose ps --format json > compose-ps.json
+
+      - name: Run mandatory Compose integration tests
+        env:
+          PA_RUN_INTEGRATION: "1"
+        run: >-
+          uv run pytest -v -ra -s --junitxml=integration-results.xml
+          tests/integration/test_http_tools_integration.py
+          tests/integration/test_mock_apis_compose.py
+          tests/integration/test_mock_llm_compose.py
+          tests/integration/test_llm_client_integration.py::test_mock_provider_regular_stream_and_tool_round_trip
+          tests/integration/test_toxiproxy_profiles.py::test_slow_profile_adds_downstream_latency_within_one_second
+
+      - name: Reject skipped mandatory tests
+        run: >-
+          python -c "import xml.etree.ElementTree as E;
+          root = E.parse('integration-results.xml').getroot();
+          skipped = len(root.findall('.//testcase/skipped'));
+          assert skipped == 0, f'{skipped} mandatory integration tests were skipped'"
+
+      - name: Capture Compose diagnostics
+        if: failure()
+        run: |
+          docker compose ps --format json > compose-ps.json
+          docker compose logs --no-color > compose-logs.txt
+
+      - name: Upload Compose integration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-integration-evidence
+          path: |
+            compose-ps.json
+            compose-logs.txt
+            integration-results.xml
+          if-no-files-found: ignore
+
+      - name: Stop Compose services
+        if: always()
+        run: docker compose down --remove-orphans

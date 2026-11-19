@@ -136,10 +136,21 @@ class HTTPToolClient:
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.settings = settings
-        base_registry = registry or build_tool_registry()
+        canonical_registry = build_tool_registry()
+        base_registry = registry or canonical_registry
         unsupported = set(base_registry.names()).difference(_ENDPOINTS)
         if unsupported:
             raise ToolBindingError(f"no HTTP binding for registered tools: {sorted(unsupported)!r}")
+        incompatible = [
+            name
+            for name in base_registry.names()
+            if base_registry.get(name).args_model is not canonical_registry.get(name).args_model
+            or base_registry.get(name).auth_scope != canonical_registry.get(name).auth_scope
+        ]
+        if incompatible:
+            raise ToolBindingError(
+                f"incompatible canonical HTTP contracts for tools: {sorted(incompatible)!r}"
+            )
         self._owns_client = http_client is None
         self._client = http_client or httpx.AsyncClient(
             base_url=settings.tool_api_base_url,

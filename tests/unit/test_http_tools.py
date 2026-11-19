@@ -7,6 +7,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from predictive_agent.config import Settings
+from predictive_agent.tools.definitions import GetOrderArgs, build_tool_registry
 from predictive_agent.tools.http_tools import (
     HTTPToolClient,
     ToolBindingError,
@@ -37,6 +38,11 @@ SCOPES = frozenset(
     }
 )
 CONTEXT = ExecutionContext(SCOPES, subject="fixture-user", tenant_id="fixture-tenant")
+
+
+class IncompatibleOrderArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    order_id: int
 
 
 def _settings() -> Settings:
@@ -465,3 +471,27 @@ def test_unsupported_custom_registry_binding_fails_during_construction() -> None
     )
     with pytest.raises(ToolBindingError, match="custom_tool"):
         HTTPToolClient(_settings(), registry=registry)
+
+
+@pytest.mark.parametrize(
+    ("args_model", "auth_scope"),
+    [
+        (GetOrderArgs, "public:read"),
+        (IncompatibleOrderArgs, "orders:read"),
+    ],
+)
+def test_custom_registry_cannot_replace_canonical_http_contracts(
+    args_model: type[BaseModel], auth_scope: str
+) -> None:
+    canonical = build_tool_registry().get("get_order")
+    registry = ToolRegistry(
+        (canonical.model_copy(update={"args_model": args_model, "auth_scope": auth_scope}),)
+    )
+
+    with pytest.raises(ToolBindingError, match="get_order"):
+        HTTPToolClient(_settings(), registry=registry)
+
+
+async def test_compatible_custom_registry_remains_supported() -> None:
+    async with HTTPToolClient(_settings(), registry=build_tool_registry()) as client:
+        assert client.registry.names() == build_tool_registry().names()

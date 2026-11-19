@@ -396,6 +396,56 @@ async def test_registry_enforces_in_flight_deadline_for_generic_executor() -> No
     assert started.is_set()
 
 
+async def test_sequential_operations_share_one_absolute_deadline() -> None:
+    received_deadlines: list[float] = []
+    remaining_budgets: list[float] = []
+    second_started = asyncio.Event()
+    second_cancelled = asyncio.Event()
+
+    async def first(
+        arguments: BaseModel, context: ExecutionContext, deadline: float
+    ) -> dict[str, Any]:
+        del arguments, context
+        received_deadlines.append(deadline)
+        remaining_budgets.append(deadline - asyncio.get_running_loop().time())
+        operation_finished = asyncio.Event()
+        asyncio.get_running_loop().call_later(0.05, operation_finished.set)
+        await operation_finished.wait()
+        return {"step": 1}
+
+    async def second(
+        arguments: BaseModel, context: ExecutionContext, deadline: float
+    ) -> dict[str, Any]:
+        del arguments, context
+        received_deadlines.append(deadline)
+        remaining_budgets.append(deadline - asyncio.get_running_loop().time())
+        second_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            second_cancelled.set()
+        return {"step": 2}
+
+    registry = ToolRegistry((_spec("first"), _spec("second"))).with_executors(
+        {"first": first, "second": second}
+    )
+    context = ExecutionContext({"test:read"})
+    deadline = asyncio.get_running_loop().time() + 0.3
+
+    assert await registry.execute(
+        "first", {"order_id": "ORD-0042"}, context=context, deadline=deadline
+    ) == {"step": 1}
+    with pytest.raises(ToolDeadlineExceeded):
+        await registry.execute(
+            "second", {"order_id": "ORD-0042"}, context=context, deadline=deadline
+        )
+
+    assert second_started.is_set()
+    assert second_cancelled.is_set()
+    assert received_deadlines == [deadline, deadline]
+    assert remaining_budgets[1] < remaining_budgets[0]
+
+
 async def test_registry_rejects_result_from_non_preemptible_executor_after_deadline() -> None:
     async def executor(
         arguments: BaseModel, context: ExecutionContext, deadline: float

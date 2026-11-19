@@ -5,9 +5,17 @@ from typing import Any, cast
 import pytest
 from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolUnionParam
 
+from predictive_agent.bench.toxiproxy import ToxiproxyClient, load_profile, toxiproxy_api_url
 from predictive_agent.config import Settings
 from predictive_agent.llm import LLMClient
 from predictive_agent.tools import TOOL_REGISTRY, ExecutionContext, HTTPToolClient
+from predictive_agent.tools.http_tools import ToolClientClosedError, ToolNotFoundError
+from predictive_agent.tools.registry import (
+    ToolArgumentsError,
+    ToolAuthorizationError,
+    ToolDeadlineExceeded,
+    UnknownToolError,
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -118,3 +126,80 @@ async def test_registry_schemas_mock_llm_and_http_execution_contract(
             deadline=deadline,
         )
     assert payload[identity_field] == identity
+
+
+async def test_preflight_rejections_do_not_require_an_external_endpoint() -> None:
+    settings = _settings(tool_api_base_url="http://127.0.0.1:1", http_timeout_s=1)
+    deadline = asyncio.get_running_loop().time() + 1
+    client = HTTPToolClient(settings)
+
+    with pytest.raises(ToolAuthorizationError):
+        await client.execute(
+            "get_order",
+            {"order_id": "ORD-0042"},
+            context=ExecutionContext(set()),
+            deadline=deadline,
+        )
+    with pytest.raises(ToolArgumentsError):
+        await client.execute(
+            "get_order",
+            {"order_id": "invalid"},
+            context=ExecutionContext({"orders:read"}),
+            deadline=deadline,
+        )
+    with pytest.raises(UnknownToolError):
+        await client.execute(
+            "unknown_tool",
+            {},
+            context=ExecutionContext(set()),
+            deadline=deadline,
+        )
+    with pytest.raises(ToolDeadlineExceeded):
+        await client.execute(
+            "get_order",
+            {"order_id": "ORD-0042"},
+            context=ExecutionContext({"orders:read"}),
+            deadline=0,
+        )
+
+    await client.close()
+    with pytest.raises(ToolClientClosedError):
+        await client.execute(
+            "get_order",
+            {"order_id": "ORD-0042"},
+            context=ExecutionContext({"orders:read"}),
+            deadline=deadline,
+        )
+
+
+async def test_nonexistent_resource_is_typed_through_toxiproxy() -> None:
+    proxy_port = os.getenv("PA_TOXIPROXY_MOCK_APIS_PORT", "18100")
+    settings = _settings(tool_api_base_url=f"http://127.0.0.1:{proxy_port}", http_timeout_s=5)
+    async with HTTPToolClient(settings) as client:
+        with pytest.raises(ToolNotFoundError):
+            await client.execute(
+                "get_order",
+                {"order_id": "ORD-9999"},
+                context=ExecutionContext({"orders:read"}),
+                deadline=asyncio.get_running_loop().time() + 5,
+            )
+
+
+async def test_registry_deadline_expires_under_toxiproxy_latency_and_restores_proxy() -> None:
+    proxy_port = os.getenv("PA_TOXIPROXY_MOCK_APIS_PORT", "18100")
+    settings = _settings(tool_api_base_url=f"http://127.0.0.1:{proxy_port}", http_timeout_s=5)
+    async with ToxiproxyClient(toxiproxy_api_url()) as toxiproxy:
+        await toxiproxy.apply(load_profile("slow"))
+        try:
+            async with HTTPToolClient(settings) as client:
+                with pytest.raises(ToolDeadlineExceeded):
+                    await client.execute(
+                        "get_order",
+                        {"order_id": "ORD-0042"},
+                        context=ExecutionContext({"orders:read"}),
+                        deadline=asyncio.get_running_loop().time() + 0.05,
+                    )
+        finally:
+            restored = await toxiproxy.reset()
+
+    assert restored.toxics == []
