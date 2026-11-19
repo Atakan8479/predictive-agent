@@ -13,6 +13,7 @@ from mocks.llm.calibration import (
 )
 
 from predictive_agent.config import Settings, get_settings
+from predictive_agent.tools import TOOL_REGISTRY
 
 FAST_HEADERS = {
     "X-Mock-LLM-Base-Latency-Ms": "0",
@@ -25,6 +26,7 @@ TOOL_PARAMETERS = {
     "get_customer": "customer_id",
     "get_policy": "policy_name",
     "get_product": "sku",
+    "get_inventory": "sku",
 }
 TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "get_order": {"type": "string", "pattern": r"^ORD-\d{4}$"},
@@ -35,6 +37,7 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "enum": ["returns", "cancellations", "shipping"],
     },
     "get_product": {"type": "string", "pattern": r"^SKU-\d{4}$"},
+    "get_inventory": {"type": "string", "pattern": r"^SKU-\d{4}$"},
 }
 
 
@@ -140,6 +143,7 @@ async def test_tool_call_and_final_response_are_deterministic(client: httpx.Asyn
         ("get_customer", "Show customer CUST-021", {"customer_id": "CUST-021"}),
         ("get_policy", "Explain the returns policy", {"policy_name": "returns"}),
         ("get_product", "Check inventory for SKU-0007", {"sku": "SKU-0007"}),
+        ("get_inventory", "Check inventory for SKU-0007", {"sku": "SKU-0007"}),
     ],
 )
 async def test_supported_tools_receive_executable_arguments(
@@ -160,6 +164,29 @@ async def test_supported_tools_receive_executable_arguments(
     assert choice["finish_reason"] == "tool_calls"
     assert call["function"]["name"] == name
     assert json.loads(call["function"]["arguments"]) == expected
+
+
+async def test_registry_generated_inventory_schema_is_mock_compatible(
+    client: httpx.AsyncClient,
+) -> None:
+    inventory = next(
+        schema
+        for schema in TOOL_REGISTRY.openai_schemas()
+        if schema["function"]["name"] == "get_inventory"
+    )
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Check inventory for SKU-0007"}],
+            "tools": [inventory],
+        },
+    )
+
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "get_inventory"
+    assert json.loads(call["function"]["arguments"]) == {"sku": "SKU-0007"}
 
 
 @pytest.mark.parametrize(
@@ -201,6 +228,74 @@ async def test_multiple_tools_selects_the_scenario_named_by_user(client: httpx.A
 
     call = response.json()["choices"][0]["message"]["tool_calls"][0]
     assert call["function"]["name"] == "get_shipment"
+
+
+@pytest.mark.parametrize("tool_choice", [None, "auto"])
+async def test_inventory_aliases_fail_closed_for_automatic_selection(
+    client: httpx.AsyncClient, tool_choice: str | None
+) -> None:
+    request: dict[str, Any] = {
+        "model": "mock-calibrated",
+        "messages": [{"role": "user", "content": "Check inventory for SKU-0007"}],
+        "tools": [_tool("get_product"), _tool("get_inventory")],
+    }
+    if tool_choice is not None:
+        request["tool_choice"] = tool_choice
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json=request,
+    )
+
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert "conflicting inventory aliases" in choice["message"]["content"]
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "function": {"name": "get_product"}},
+        {"type": "function", "function": {"name": "get_inventory"}},
+    ],
+)
+async def test_inventory_aliases_fail_closed_for_forced_selection(
+    client: httpx.AsyncClient, tool_choice: str | dict[str, Any]
+) -> None:
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Check inventory for SKU-0007"}],
+            "tools": [_tool("get_product"), _tool("get_inventory")],
+            "tool_choice": tool_choice,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "conflicting inventory aliases" in response.json()["detail"]
+
+
+async def test_inventory_alias_conflict_precedes_schema_validation_and_other_tools(
+    client: httpx.AsyncClient,
+) -> None:
+    invalid_inventory = _tool("get_inventory")
+    invalid_inventory["function"]["parameters"] = {"type": "array"}
+    response = await client.post(
+        "/v1/chat/completions",
+        headers=FAST_HEADERS,
+        json={
+            "model": "mock-calibrated",
+            "messages": [{"role": "user", "content": "Show order ORD-0042"}],
+            "tools": [_tool("get_order"), _tool("get_product"), invalid_inventory],
+        },
+    )
+
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert "conflicting inventory aliases" in choice["message"]["content"]
 
 
 async def test_named_tool_choice_is_respected(client: httpx.AsyncClient) -> None:

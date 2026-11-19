@@ -42,7 +42,13 @@ SUPPORTED_TOOLS: dict[str, ToolSpec] = {
         re.compile(r"\b(?:returns|cancellations|shipping)\b", re.IGNORECASE),
         ("policy", "return", "cancel", "shipping"),
     ),
+    # get_product is the frozen M1.5 name; get_inventory is the canonical M1.7 contract.
     "get_product": (
+        "sku",
+        re.compile(r"\bSKU-\d{4}\b", re.IGNORECASE),
+        ("product", "inventory", "sku"),
+    ),
+    "get_inventory": (
         "sku",
         re.compile(r"\bSKU-\d{4}\b", re.IGNORECASE),
         ("product", "inventory", "sku"),
@@ -332,6 +338,13 @@ def _select_tool(
 ) -> tuple[ChatTool | None, dict[str, Any] | None, str | None]:
     if not request.tools:
         return None, None, "Mock cannot call a tool safely: no tools were supplied."
+    advertised_names = {tool.function.name for tool in request.tools}
+    if {"get_product", "get_inventory"}.issubset(advertised_names):
+        return (
+            None,
+            None,
+            "Mock cannot call a tool safely: conflicting inventory aliases were supplied.",
+        )
     user_text = next(
         (message.content or "" for message in reversed(request.messages) if message.role == "user"),
         "",
